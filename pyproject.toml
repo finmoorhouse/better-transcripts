@@ -8,5 +8,7 @@ dependencies = [
     "fastapi-users-db-sqlmodel>=0.3.0",
     "fastapi-users>=14.0.1",
     "fastapi[standard]>=0.116.1",
+    "google-genai>=1.35.0",
+    "pydub>=0.25.1",
     "sqlmodel>=0.0.24",
 ]

@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, BackgroundTasks, Depends
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from sqlmodel import SQLModel, Field, create_engine, Session, select, Relationship
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import uvicorn
 import os
@@ -14,10 +14,53 @@ import time
 import tempfile
 import uuid
 import logging
+import random
+import json
+from dotenv import load_dotenv
+import google.genai as genai
+import httpx
+from pydub import AudioSegment
+from pydub.silence import detect_nonsilent
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging with HTTP debugging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s:%(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Enable detailed HTTP logging for debugging API issues
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("google.genai").setLevel(logging.INFO)
+
+# Enable debug-level logging for HTTP requests (shows full request/response details)
+# Uncomment the lines below for even more detailed HTTP debugging:
+# logging.getLogger("httpx").setLevel(logging.DEBUG)
+# logging.getLogger("httpcore").setLevel(logging.DEBUG)
+
+# Set to True to enable verbose HTTP debugging (can be toggled easily)
+VERBOSE_HTTP_DEBUG = os.getenv("VERBOSE_HTTP_DEBUG", "false").lower() == "true"
+if VERBOSE_HTTP_DEBUG:
+    logging.getLogger("httpx").setLevel(logging.DEBUG)
+    logging.getLogger("httpcore").setLevel(logging.DEBUG)
+    logger.info("Verbose HTTP debugging enabled")
+
+# Custom exception for transcription timeouts
+class TranscriptionTimeoutError(Exception):
+    """Custom exception for transcription timeout errors"""
+    pass
+
+# Load environment variables
+load_dotenv()
+
+# Configure Google Gemini API
+from google.genai import types
+client = genai.Client(
+    api_key=os.getenv("GEMINI_KEY"),
+    http_options=types.HttpOptions(
+        timeout=900_000  # 15 minutes in milliseconds
+    )
+)
 
 # Job status enumeration
 class JobStatus(str, Enum):
@@ -38,6 +81,7 @@ class Job(SQLModel, table=True):
     result: Optional[str] = Field(default=None)  # Deprecated - use transcript_file_path instead
     transcript_file_path: Optional[str] = Field(default=None)  # Path to transcript .md file
     user_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id", index=True)
+    api_cost: Optional[float] = Field(default=None)  # Cost of this job in dollars
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = Field(default=None)
 
@@ -120,25 +164,464 @@ def load_transcript_from_file(file_path: str) -> str:
     except FileNotFoundError:
         return ""
 
-async def process_transcription(job_id: int):
-    """Background task to simulate transcription API processing."""
-    # Wait 5 seconds to simulate API processing time
-    await asyncio.sleep(5)
+def format_transcript_for_display(transcript_text: str) -> str:
+    """Format transcript for display - handle both JSON and plain text."""
+    try:
+        # Try to parse as JSON and format nicely
+        parsed_json = json.loads(transcript_text)
+        return json.dumps(parsed_json, indent=2, ensure_ascii=False)
+    except json.JSONDecodeError:
+        # If not JSON, return as-is (backwards compatibility)
+        return transcript_text
+
+def chunk_audio_file(file_path: str, chunk_minutes: int = 20, overlap_minutes: int = 2) -> list[str]:
+    """
+    Split audio file into chunks with overlap for reliable processing.
     
-    # Simulate transcription result
-    dummy_transcript = """
-    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-    """.strip()
+    Args:
+        file_path: Path to the audio file
+        chunk_minutes: Target chunk length in minutes (default: 20)
+        overlap_minutes: Overlap between chunks in minutes (default: 2)
     
-    # Save transcript to file and update job status in database
+    Returns:
+        List of paths to chunk files
+    """
+    try:
+        logger.info(f"Loading audio file for chunking: {file_path}")
+        
+        # Load audio file
+        audio = AudioSegment.from_file(file_path)
+        total_duration_ms = len(audio)
+        total_minutes = total_duration_ms / (1000 * 60)
+        
+        logger.info(f"Audio duration: {total_minutes:.1f} minutes")
+        
+        # If file is shorter than chunk size, no need to split
+        if total_minutes <= chunk_minutes:
+            logger.info(f"File is {total_minutes:.1f} minutes, shorter than chunk size ({chunk_minutes} min). No splitting needed.")
+            return [file_path]
+        
+        # Convert times to milliseconds
+        chunk_length_ms = chunk_minutes * 60 * 1000
+        overlap_ms = overlap_minutes * 60 * 1000
+        step_size_ms = chunk_length_ms - overlap_ms
+        
+        chunk_paths = []
+        chunk_num = 0
+        start_ms = 0
+        
+        while start_ms < total_duration_ms:
+            chunk_num += 1
+            end_ms = min(start_ms + chunk_length_ms, total_duration_ms)
+            
+            logger.info(f"Creating chunk {chunk_num}: {start_ms/60000:.1f}m - {end_ms/60000:.1f}m")
+            
+            # Extract chunk
+            chunk = audio[start_ms:end_ms]
+            
+            # Generate chunk filename
+            base_name = os.path.splitext(file_path)[0]
+            chunk_path = f"{base_name}_chunk_{chunk_num:03d}.wav"
+            
+            # Export chunk as WAV for consistent format
+            chunk.export(chunk_path, format="wav")
+            chunk_paths.append(chunk_path)
+            
+            logger.info(f"Saved chunk {chunk_num}: {chunk_path}")
+            
+            # Move to next chunk
+            start_ms += step_size_ms
+            
+            # Break if we've reached the end
+            if end_ms >= total_duration_ms:
+                break
+        
+        logger.info(f"Created {len(chunk_paths)} audio chunks")
+        return chunk_paths
+        
+    except Exception as e:
+        logger.error(f"Error chunking audio file {file_path}: {str(e)}")
+        # Return original file if chunking fails
+        return [file_path]
+
+def cleanup_chunk_files(chunk_paths: list[str], original_path: str):
+    """Clean up temporary chunk files, keeping the original."""
+    for chunk_path in chunk_paths:
+        if chunk_path != original_path and os.path.exists(chunk_path):
+            try:
+                os.remove(chunk_path)
+                logger.info(f"Cleaned up chunk: {chunk_path}")
+            except OSError as e:
+                logger.warning(f"Failed to cleanup chunk {chunk_path}: {str(e)}")
+
+def format_local_datetime(utc_dt: datetime) -> str:
+    """Convert UTC datetime to local time and format for display."""
+    if utc_dt is None:
+        return ""
+    
+    # Ensure the datetime is timezone-aware (UTC)
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    
+    # Convert to local time
+    local_dt = utc_dt.astimezone()
+    
+    # Format for display
+    return local_dt.strftime('%Y-%m-%d %H:%M')
+
+def prepare_content(uploaded_file, previous_transcript: str = None, chunk_number: int = 1, total_chunks: int = 1) -> list:
+    """Prepare audio file and prompt for transcription with structured output."""
+    audio = types.Part.from_uri(
+        file_uri=uploaded_file.uri,
+        mime_type=uploaded_file.mime_type,
+    )
+    
+    # Base prompt
+    prompt = f"""Generate a detailed diarized transcript for this audio file (chunk {chunk_number} of {total_chunks}). 
+    
+IMPORTANT: Group ALL consecutive speech from the same speaker into a SINGLE JSON entry. Only create a new JSON entry when the speaker changes.
+
+For example:
+- If Speaker 1 talks for 30 seconds continuously, put all their text in ONE entry
+- Only create a new entry when Speaker 2 starts talking
+- Then group all of Speaker 2's consecutive speech into one entry
+- And so on
+
+Remove filler words, repetition, and other non-essential content — the result should be a slightly tidied up and fluent version of the actual speech."""
+
+    # Add context from previous chunks if available
+    if previous_transcript and chunk_number > 1:
+        prompt += f"""
+
+CONTEXT FROM PREVIOUS CHUNKS:
+The speakers from earlier parts of this audio are:
+{previous_transcript}
+
+IMPORTANT: Continue using the SAME speaker numbering as the previous chunks. If "Speaker 1" and "Speaker 2" were speaking in previous chunks, continue using those exact labels for the same people in this chunk. Do NOT restart numbering.
+
+This helps maintain speaker consistency across the entire transcript."""
+
+    text = types.Part.from_text(text=prompt)
+    return [
+        types.Content(
+            role="user",
+            parts=[audio, text]
+        ),
+    ]
+
+def configure_generation() -> types.GenerateContentConfig:
+    """Configure generation with JSON schema for structured response."""
+    # JSON schema for structured response
+    schema = {
+        "type": "ARRAY",
+        "description": "A diarized transcript with speaker changes. Each entry represents ALL consecutive speech from one speaker before switching to another speaker.",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "timestamp": {"type": "STRING", "description": "Start time when this speaker begins (mm:ss format)"},
+                "speaker": {"type": "STRING", "description": "Speaker identifier (e.g., Speaker 1, Speaker 2)"},
+                "text": {"type": "STRING", "description": "All consecutive transcribed text from this speaker until the next speaker begins"}
+            },
+            "required": ["speaker", "text"]
+        }
+    }
+
+    # Config params
+    return types.GenerateContentConfig(
+        temperature=1.0,
+        top_p=0.95,
+        seed=0,
+        max_output_tokens=32768,
+        response_modalities=["TEXT"],
+        response_mime_type="application/json",
+        response_schema=schema,
+    )
+
+def process_single_chunk(uploaded_file, chunk_number: int, total_chunks: int, previous_transcript: str = None) -> str:
+    """Process a single audio chunk and return the transcript with robust retry logic."""
+    max_retries = 5  # Increased from 3 to 5 for connection issues
+    base_delay = 3  # Start with 3 second delay
+    
+    for attempt in range(max_retries):
+        try:
+            # Prepare structured transcription request with context
+            contents = prepare_content(uploaded_file, previous_transcript, chunk_number, total_chunks)
+            config = configure_generation()
+            
+            logger.info(f"Starting transcription for chunk {chunk_number}/{total_chunks} (attempt {attempt + 1}/{max_retries})")
+            
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=config
+            )
+            transcript_text = response.text.strip()
+            
+            # Validate JSON response
+            try:
+                json.loads(transcript_text)
+                logger.info(f"Valid JSON response received for chunk {chunk_number}")
+            except json.JSONDecodeError as json_err:
+                logger.warning(f"Response is not valid JSON for chunk {chunk_number}: {json_err}")
+            
+            return transcript_text
+            
+        except Exception as api_e:
+            error_message = str(api_e)
+            error_type = type(api_e).__name__
+            
+            # Log full exception details for debugging
+            logger.error(f"Exception details for chunk {chunk_number}: {error_type}: {error_message}")
+            if hasattr(api_e, 'response') and api_e.response is not None:
+                logger.error(f"HTTP Response status: {api_e.response.status_code}")
+                logger.error(f"HTTP Response headers: {dict(api_e.response.headers)}")
+                if hasattr(api_e.response, 'text'):
+                    logger.error(f"HTTP Response body: {api_e.response.text[:500]}")  # First 500 chars
+            
+            # Check if this is a retryable error (connection issues, 503, rate limits, etc.)
+            is_retryable = (
+                isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)) or
+                "503" in error_message or 
+                "overloaded" in error_message.lower() or
+                "rate limit" in error_message.lower() or
+                "too many requests" in error_message.lower() or
+                "unavailable" in error_message.lower() or
+                "server disconnected" in error_message.lower() or
+                "connection" in error_message.lower()
+            )
+            
+            if is_retryable and attempt < max_retries - 1:
+                # Exponential backoff with jitter for connection issues
+                if isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)):
+                    delay = base_delay * (2 ** attempt) + random.uniform(2, 5)  # Longer delay for connection issues
+                    logger.warning(f"Connection error for chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {error_type}: {error_message}")
+                else:
+                    delay = base_delay * (2 ** attempt) + random.uniform(1, 3)
+                    logger.warning(f"Retryable error for chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {error_type}: {error_message}")
+                
+                logger.info(f"Retrying chunk {chunk_number} in {delay:.1f} seconds...")
+                time.sleep(delay)
+                continue
+            else:
+                # Only raise timeout error if we've exhausted all retries on connection issues
+                if isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)):
+                    logger.error(f"HTTP timeout/disconnect during transcription for chunk {chunk_number} after {max_retries} attempts: {error_type}: {api_e}")
+                    raise TranscriptionTimeoutError(
+                        f"Transcription timed out for chunk {chunk_number} after {max_retries} attempts. Consider using smaller chunks."
+                    ) from api_e
+                else:
+                    logger.error(f"API error during transcription for chunk {chunk_number} after {max_retries} attempts: {error_type}: {api_e}")
+                    raise
+    
+    # Should never reach here due to the raise in the except block
+    raise Exception(f"Failed to process chunk {chunk_number} after {max_retries} attempts")
+
+def merge_chunk_transcripts(chunk_transcripts: list[str], overlap_minutes: int = 2) -> str:
+    """Merge multiple chunk transcripts, removing overlaps and aligning speakers."""
+    if not chunk_transcripts:
+        return ""
+    
+    if len(chunk_transcripts) == 1:
+        return chunk_transcripts[0]
+    
+    try:
+        merged_segments = []
+        
+        for i, chunk_transcript in enumerate(chunk_transcripts):
+            try:
+                chunk_json = json.loads(chunk_transcript)
+                logger.info(f"Processing chunk {i+1} with {len(chunk_json)} segments")
+                
+                if i == 0:
+                    # First chunk - add all segments
+                    merged_segments.extend(chunk_json)
+                else:
+                    # Subsequent chunks - skip overlapping content
+                    # For now, add all segments (overlap removal can be enhanced later)
+                    for segment in chunk_json:
+                        # Simple duplicate removal - skip if text matches last few segments
+                        duplicate = False
+                        for recent_segment in merged_segments[-3:]:  # Check last 3 segments
+                            if segment.get('text', '').strip() == recent_segment.get('text', '').strip():
+                                duplicate = True
+                                logger.info(f"Skipping duplicate segment: {segment.get('text', '')[:50]}...")
+                                break
+                        
+                        if not duplicate:
+                            merged_segments.append(segment)
+                            
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse chunk {i+1} as JSON: {e}")
+                # If JSON parsing fails, treat as plain text
+                if i == 0:
+                    merged_segments.append({"speaker": "Speaker 1", "text": chunk_transcript})
+                else:
+                    merged_segments.append({"speaker": "Unknown", "text": chunk_transcript})
+        
+        logger.info(f"Merged {len(chunk_transcripts)} chunks into {len(merged_segments)} total segments")
+        return json.dumps(merged_segments, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        logger.error(f"Error merging chunk transcripts: {e}")
+        # Fallback - concatenate all transcripts
+        return "\n\n=== CHUNK SEPARATOR ===\n\n".join(chunk_transcripts)
+
+def process_transcription(job_id: int):
+    """Background task to transcribe audio using Google Gemini API."""
+    # Get job details and file path first
     with Session(engine) as session:
         job = session.get(Job, job_id)
-        if job:
-            transcript_file_path = save_transcript_to_file(job_id, dummy_transcript)
-            job.status = JobStatus.completed
-            job.transcript_file_path = transcript_file_path
-            job.completed_at = datetime.utcnow()
-            session.commit()
+        if not job:
+            logger.error(f"Job {job_id} not found")
+            return
+        
+        if not job.file_path:
+            logger.error(f"Job {job_id} missing file path - file may have been deleted or job already processed")
+            return
+        
+        file_path = job.file_path
+        filename = job.filename
+        user_id = job.user_id
+    
+    # Process the transcription without holding database connections
+    chunk_paths = []
+    try:
+        logger.info(f"Starting chunked transcription for job {job_id}: {filename}")
+        
+        # Step 1: Split audio into chunks
+        chunk_paths = chunk_audio_file(file_path, chunk_minutes=15, overlap_minutes=2)
+        logger.info(f"Created {len(chunk_paths)} chunks for processing")
+        
+        # Step 2: Process chunks sequentially with context
+        chunk_transcripts = []
+        combined_previous_transcript = ""
+        
+        for i, chunk_path in enumerate(chunk_paths):
+            chunk_number = i + 1
+            total_chunks = len(chunk_paths)
+            
+            logger.info(f"Processing chunk {chunk_number}/{total_chunks}: {os.path.basename(chunk_path)}")
+            
+            try:
+                # Upload chunk to Gemini
+                uploaded_file = client.files.upload(file=chunk_path)
+                logger.info(f"Chunk {chunk_number} uploaded to Gemini: {uploaded_file.name}")
+                
+                # Process chunk with context from previous chunks
+                chunk_transcript = process_single_chunk(
+                    uploaded_file, 
+                    chunk_number, 
+                    total_chunks, 
+                    combined_previous_transcript if chunk_number > 1 else None
+                )
+                
+                chunk_transcripts.append(chunk_transcript)
+                logger.info(f"Chunk {chunk_number} transcription completed")
+                
+                # Update combined context for next chunk (keep it concise)
+                try:
+                    chunk_json = json.loads(chunk_transcript)
+                    # Keep last few segments as context
+                    recent_segments = chunk_json[-2:] if len(chunk_json) > 2 else chunk_json
+                    combined_previous_transcript = json.dumps(recent_segments, indent=2)
+                except json.JSONDecodeError:
+                    # If not JSON, use text directly but keep it short
+                    combined_previous_transcript = chunk_transcript[-500:] if len(chunk_transcript) > 500 else chunk_transcript
+                
+                # Clean up uploaded file from Gemini
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                    logger.info(f"Deleted chunk {chunk_number} from Gemini: {uploaded_file.name}")
+                except Exception as cleanup_e:
+                    logger.warning(f"Failed to cleanup chunk {chunk_number} from Gemini: {cleanup_e}")
+                
+                # Add delay between chunks to avoid overwhelming the API and reduce connection issues
+                if chunk_number < total_chunks:  # Don't delay after the last chunk
+                    delay = 3 + random.uniform(1.0, 2.0)  # 4-5 second delay (increased)
+                    logger.info(f"Waiting {delay:.1f}s before processing next chunk...")
+                    time.sleep(delay)
+                
+            except TranscriptionTimeoutError:
+                logger.error(f"Chunk {chunk_number} timed out - aborting remaining chunks")
+                raise
+            except Exception as chunk_e:
+                logger.error(f"Error processing chunk {chunk_number}: {str(chunk_e)}")
+                raise
+        
+        # Step 3: Merge all chunk transcripts
+        logger.info("Merging chunk transcripts...")
+        transcript_text = merge_chunk_transcripts(chunk_transcripts, overlap_minutes=2)
+        logger.info(f"Chunked transcription completed for job {job_id}")
+        
+        # Clean up chunk files
+        cleanup_chunk_files(chunk_paths, file_path)
+        
+        # Save transcript to file
+        transcript_file_path = save_transcript_to_file(job_id, transcript_text)
+        
+        # Delete the original audio file after successful processing
+        try:
+            os.remove(file_path)
+            logger.info(f"Deleted original audio file: {file_path}")
+        except OSError as e:
+            logger.warning(f"Failed to delete original audio file {file_path}: {str(e)}")
+        
+        # For now, use a small fixed cost - you can implement actual cost calculation later
+        api_cost = 0.50  # Placeholder cost
+        
+        # Single database operation: update job completion and clear file path
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if job:
+                job.status = JobStatus.completed
+                job.transcript_file_path = transcript_file_path
+                job.completed_at = datetime.utcnow()
+                job.api_cost = api_cost
+                job.file_path = None  # Clear file path since we deleted the file
+                
+                # Update user's total API cost in the same transaction
+                if user_id:
+                    user = session.get(User, user_id)
+                    if user:
+                        user.total_api_cost += api_cost
+                
+                session.commit()
+                logger.info(f"Job {job_id} completed successfully")
+        
+    except TranscriptionTimeoutError as timeout_e:
+        logger.error(f"Transcription timeout for job {job_id}: {str(timeout_e)}")
+        # Clean up chunk files on timeout
+        if chunk_paths:
+            cleanup_chunk_files(chunk_paths, file_path)
+        # Handle timeout failure with a fresh session - mark as failed with timeout message
+        try:
+            with Session(engine) as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.failed
+                    job.completed_at = datetime.utcnow()
+                    # Could add a timeout-specific error field here in future
+                    session.commit()
+                    logger.info(f"Job {job_id} marked as failed due to timeout")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
+    except Exception as e:
+        logger.error(f"Transcription failed for job {job_id}: {str(e)}")
+        # Clean up chunk files on general error
+        if chunk_paths:
+            cleanup_chunk_files(chunk_paths, file_path)
+        # Handle general failure with a fresh session
+        try:
+            with Session(engine) as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.failed
+                    job.completed_at = datetime.utcnow()
+                    session.commit()
+        except Exception as cleanup_error:
+            logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
+
+# Removed old streaming code - now using chunked non-streaming approach
 
 app = FastAPI(title="Better Transcripts", description="High-quality formatted transcripts")
 
@@ -166,379 +649,19 @@ app.include_router(
     fastapi_users.get_verify_router(UserRead), prefix="/auth", tags=["auth"]
 )
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+# Include page routes
+from page_routes import router as page_router
+app.include_router(page_router)
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+# Include auth status routes
+from auth_routes import router as auth_router
+app.include_router(auth_router)
 
-@app.get("/register", response_class=HTMLResponse) 
-async def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
+# Include job routes  
+from job_routes import router as job_router
+app.include_router(job_router)
 
-@app.get("/check-auth")
-async def check_auth(request: Request):
-    logger.info("Checking authentication status")
-    logger.info(f"Cookies: {request.cookies}")
-    
-    # Check if user has auth cookie
-    auth_cookie = request.cookies.get("fastapiusersauth")
-    logger.info(f"Auth cookie present: {auth_cookie is not None}")
-    
-    if auth_cookie:
-        try:
-            # Try to get user using the dependency
-            # We'll create a simple route that tries to access a protected resource
-            return HTMLResponse(f"""
-                <div hx-get="/auth-test" hx-trigger="load"></div>
-            """)
-        except Exception as e:
-            logger.error(f"Error with auth cookie: {e}")
-    
-    logger.info("User is not authenticated, showing login prompt")
-    # User is not authenticated, show login prompt
-    return HTMLResponse("""
-        <div class="max-w-md mx-auto bg-white rounded-lg shadow-md p-6 text-center">
-            <h2 class="text-2xl font-semibold mb-4 text-gray-700">Welcome to Better Transcripts</h2>
-            <p class="text-gray-600 mb-6">Please log in to access your transcription jobs.</p>
-            <div class="space-y-3">
-                <a href="/login" class="block w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition duration-300">
-                    Login
-                </a>
-                <a href="/register" class="block w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded transition duration-300">
-                    Register
-                </a>
-            </div>
-        </div>
-    """)
-
-@app.get("/auth-test")
-async def auth_test(user: User = Depends(current_active_user)):
-    logger.info(f"Auth test successful for user: {user.email}")
-    return HTMLResponse(f"""
-        <div hx-get="/jobs/list/view" hx-trigger="load"></div>
-        <script>
-            // Load auth status
-            htmx.ajax('GET', '/auth-status', {{target: '#auth-status'}});
-        </script>
-    """)
-
-@app.get("/auth-status")
-async def auth_status(user: User = Depends(current_active_user)):
-    return HTMLResponse(f"""
-        <div class="flex items-center gap-3">
-            <span class="text-sm text-gray-600">Welcome, {user.name}</span>
-            <button onclick="logout()" class="bg-red-500 hover:bg-red-600 text-white text-sm px-3 py-1 rounded transition duration-300">
-                Logout
-            </button>
-        </div>
-        <script>
-            async function logout() {{
-                try {{
-                    await fetch('/auth/jwt/logout', {{method: 'POST'}});
-                    window.location.reload();
-                }} catch (error) {{
-                    console.error('Logout failed:', error);
-                }}
-            }}
-        </script>
-    """)
-
-@app.post("/jobs/add")
-async def add_job(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks(), user: User = Depends(current_active_user)):
-    # Validate file
-    error_msg = validate_audio_file(file)
-    if error_msg:
-        return HTMLResponse(f"<div class='text-red-600 font-semibold'>❌ {error_msg}</div>")
-    
-    with Session(engine) as session:
-        # Create job first to get ID
-        db_job = Job(filename=file.filename, status=JobStatus.processing, user_id=user.id)
-        session.add(db_job)
-        session.commit()
-        session.refresh(db_job)
-        
-        try:
-            # Save file with job ID
-            file_path, file_size = save_uploaded_file(file, db_job.id)
-            
-            # Update job with file info
-            db_job.file_path = file_path
-            db_job.file_size = file_size
-            session.commit()
-            
-            # Start background transcription processing
-            background_tasks.add_task(process_transcription, db_job.id)
-            
-            return HTMLResponse(f"<div class='text-blue-600 font-semibold'>🔄 Processing job: {file.filename} ({file_size // 1024} KB)</div>")
-            
-        except Exception as e:
-            # If file save fails, delete the job
-            session.delete(db_job)
-            session.commit()
-            return HTMLResponse(f"<div class='text-red-600 font-semibold'>❌ Failed to save file: {str(e)}</div>")
-
-@app.get("/jobs/list")
-async def list_jobs(user: User = Depends(current_active_user)):
-    with Session(engine) as session:
-        jobs = session.exec(select(Job).where(Job.user_id == user.id).order_by(Job.created_at.desc())).all()
-        if not jobs:
-            return HTMLResponse("<div class='text-gray-500'>No jobs found.</div>")
-        
-        job_items = []
-        for job in jobs:
-            status_color = {
-                "pending": "text-yellow-600",
-                "processing": "text-blue-600", 
-                "completed": "text-green-600",
-                "failed": "text-red-600"
-            }.get(job.status, "text-gray-600")
-            
-            file_info = f" • {job.file_size // 1024:,} KB" if job.file_size else ""
-            job_items.append(f"<li class='py-2 border-b border-gray-200 last:border-b-0 hover:bg-gray-50 cursor-pointer' hx-get='/jobs/{job.id}' hx-target='#main-content' hx-swap='innerHTML'><div class='flex justify-between items-start'><div><div class='font-medium'>{job.filename}</div><div class='text-sm text-gray-500'>Created: {job.created_at.strftime('%Y-%m-%d %H:%M')}{file_info}</div></div><span class='px-2 py-1 text-xs rounded-full bg-gray-100 {status_color}'>{job.status}</span></div></li>")
-        
-        return HTMLResponse(f"<ul class='divide-y divide-gray-200'>{''.join(job_items)}</ul>")
-
-@app.get("/jobs/{job_id}")
-async def get_job_detail(job_id: int, user: User = Depends(current_active_user)):
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-        if not job or job.user_id != user.id:
-            return HTMLResponse("<div class='text-red-500'>Job not found.</div>")
-        
-        status_color = {
-            "pending": "bg-yellow-100 text-yellow-800",
-            "processing": "bg-blue-100 text-blue-800", 
-            "completed": "bg-green-100 text-green-800",
-            "failed": "bg-red-100 text-red-800"
-        }.get(job.status, "bg-gray-100 text-gray-800")
-        
-        transcript_section = ""
-        transcript_content = ""
-        if job.transcript_file_path:
-            transcript_content = load_transcript_from_file(job.transcript_file_path)
-        elif job.result:  # Fallback for old records
-            transcript_content = job.result
-            
-        if transcript_content:
-            download_button = f"""
-                <div class='mb-3'>
-                    <a href='/jobs/{job_id}/download' 
-                       class='inline-flex items-center px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-md transition duration-300'>
-                        <svg class='w-4 h-4 mr-2' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
-                            <path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z'></path>
-                        </svg>
-                        Download Transcript
-                    </a>
-                </div>
-            """
-            transcript_section = f"""
-                <div class='mt-6'>
-                    <h3 class='text-lg font-semibold mb-3'>Transcription Result</h3>
-                    {download_button}
-                    <div class='bg-gray-50 p-4 rounded-lg border'>
-                        <pre class='whitespace-pre-wrap text-sm leading-relaxed'>{transcript_content}</pre>
-                    </div>
-                </div>
-            """
-        elif job.status == "completed":
-            transcript_section = """
-                <div class='mt-6'>
-                    <h3 class='text-lg font-semibold mb-3'>Transcription Result</h3>
-                    <div class='bg-gray-50 p-4 rounded-lg border text-gray-500'>
-                        Transcription completed but result not available.
-                    </div>
-                </div>
-            """
-        elif job.status == "processing":
-            transcript_section = """
-                <div class='mt-6'>
-                    <h3 class='text-lg font-semibold mb-3'>Transcription Result</h3>
-                    <div class='bg-blue-50 p-4 rounded-lg border text-blue-700'>
-                        🔄 Transcription in progress... This may take a few minutes.
-                    </div>
-                </div>
-            """
-        elif job.status == "failed":
-            transcript_section = """
-                <div class='mt-6'>
-                    <h3 class='text-lg font-semibold mb-3'>Transcription Result</h3>
-                    <div class='bg-red-50 p-4 rounded-lg border text-red-700'>
-                        ❌ Transcription failed. Please try uploading the file again.
-                    </div>
-                </div>
-            """
-        
-        completed_info = ""
-        if job.completed_at:
-            completed_info = f"<div class='text-sm text-gray-500'>Completed: {job.completed_at.strftime('%Y-%m-%d %H:%M')}</div>"
-        
-        # Add auto-refresh for processing jobs
-        auto_refresh = ""
-        if job.status == "processing":
-            auto_refresh = f'hx-get="/jobs/{job.id}" hx-target="#main-content" hx-swap="innerHTML" hx-trigger="every 3s"'
-        
-        detail_html = f"""
-            <div class='max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6' {auto_refresh}>
-                <div class='flex items-center justify-between mb-6'>
-                    <button 
-                        hx-get="/jobs/list/view" 
-                        hx-target="#main-content" 
-                        hx-swap="innerHTML"
-                        class='text-blue-500 hover:text-blue-600 flex items-center space-x-2'>
-                        <span>←</span><span>Back to Jobs</span>
-                    </button>
-                    <span class='px-3 py-1 text-sm rounded-full {status_color}'>{job.status}</span>
-                </div>
-                
-                <div class='mb-6'>
-                    <h1 class='text-2xl font-bold text-gray-800 mb-2'>{job.filename}</h1>
-                    <div class='text-sm text-gray-500 space-y-1'>
-                        <div>Created: {job.created_at.strftime('%Y-%m-%d %H:%M')}</div>
-                        {completed_info}
-                        {f"<div>User ID: {job.user_id}</div>" if job.user_id else ""}
-                    </div>
-                </div>
-                
-                <div class='border-t pt-6'>
-                    <h3 class='text-lg font-semibold mb-3'>Job Details</h3>
-                    <div class='grid grid-cols-2 gap-4 text-sm'>
-                        <div>
-                            <span class='font-medium text-gray-600'>Status:</span>
-                            <span class='ml-2'>{job.status}</span>
-                        </div>
-                        <div>
-                            <span class='font-medium text-gray-600'>Job ID:</span>
-                            <span class='ml-2'>#{job.id}</span>
-                        </div>
-                        {"<div><span class='font-medium text-gray-600'>File Size:</span><span class='ml-2'>" + f"{job.file_size // 1024:,} KB" + "</span></div>" if job.file_size else ""}
-                        {"<div><span class='font-medium text-gray-600'>Audio File:</span><span class='ml-2 text-xs text-gray-500'>" + job.file_path + "</span></div>" if job.file_path else ""}
-                        {"<div><span class='font-medium text-gray-600'>Transcript File:</span><span class='ml-2 text-xs text-gray-500'>" + job.transcript_file_path + "</span></div>" if job.transcript_file_path else ""}
-                    </div>
-                </div>
-                
-                {transcript_section}
-            </div>
-        """
-        
-        return HTMLResponse(detail_html)
-
-@app.get("/jobs/list/view")
-async def get_job_list_view(user: User = Depends(current_active_user)):
-    with Session(engine) as session:
-        jobs = session.exec(select(Job).where(Job.user_id == user.id).order_by(Job.created_at.desc())).all()
-        if not jobs:
-            jobs_content = "<div class='text-gray-500'>No jobs found.</div>"
-        else:
-            job_items = []
-            for job in jobs:
-                status_color = {
-                    "pending": "text-yellow-600",
-                    "processing": "text-blue-600", 
-                    "completed": "text-green-600",
-                    "failed": "text-red-600"
-                }.get(job.status, "text-gray-600")
-                
-                file_info = f" • {job.file_size // 1024:,} KB" if job.file_size else ""
-                job_items.append(f"<li class='py-2 border-b border-gray-200 last:border-b-0 hover:bg-gray-50 cursor-pointer' hx-get='/jobs/{job.id}' hx-target='#main-content' hx-swap='innerHTML'><div class='flex justify-between items-start'><div><div class='font-medium'>{job.filename}</div><div class='text-sm text-gray-500'>Created: {job.created_at.strftime('%Y-%m-%d %H:%M')}{file_info}</div></div><span class='px-2 py-1 text-xs rounded-full bg-gray-100 {status_color}'>{job.status}</span></div></li>")
-            
-            jobs_content = f"<ul class='divide-y divide-gray-200'>{''.join(job_items)}</ul>"
-    
-    list_view_html = f"""
-        <div class='max-w-2xl mx-auto bg-white rounded-lg shadow-md p-6'>
-            <h2 class='text-2xl font-semibold mb-4 text-gray-700'>Transcription Jobs</h2>
-            
-            <div class='space-y-4'>
-                <form hx-post='/jobs/add' hx-target='#job-result' hx-swap='innerHTML' hx-encoding='multipart/form-data'>
-                    <div class='space-y-3'>
-                        <div>
-                            <label class='block text-sm font-medium text-gray-700 mb-2'>Select Audio File</label>
-                            <input 
-                                type='file' 
-                                name='file' 
-                                accept='.wav,.mp3,audio/wav,audio/mpeg'
-                                required
-                                class='block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100'>
-                            <p class='mt-1 text-xs text-gray-500'>Upload .wav or .mp3 files up to 100MB</p>
-                        </div>
-                        <button 
-                            type='submit'
-                            class='w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition duration-300'>
-                            Upload & Create Job
-                        </button>
-                    </div>
-                </form>
-                
-                <div 
-                    id='job-result' 
-                    class='p-2 min-h-[30px]'>
-                    <!-- Add job result will appear here -->
-                </div>
-                
-                <div class='border-t pt-4'>
-                    <div class='flex justify-between items-center mb-4'>
-                        <h3 class='font-semibold'>Transcription Jobs:</h3>
-                        <button 
-                            hx-get='/jobs/list/view' 
-                            hx-target='#main-content' 
-                            hx-swap='innerHTML'
-                            class='text-blue-500 hover:text-blue-600 text-sm'>
-                            Refresh
-                        </button>
-                    </div>
-                    <div 
-                        id='job-list' 
-                        class='bg-gray-50 rounded border min-h-[120px] p-4'>
-                        {jobs_content}
-                    </div>
-                </div>
-            </div>
-        </div>
-    """
-    
-    return HTMLResponse(list_view_html)
-
-@app.get("/jobs/{job_id}/download")
-async def download_transcript(job_id: int, user: User = Depends(current_active_user)):
-    with Session(engine) as session:
-        job = session.get(Job, job_id)
-        if not job or job.user_id != user.id:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        if job.status != "completed":
-            raise HTTPException(status_code=400, detail="Transcript not ready for download")
-        
-        transcript_content = ""
-        if job.transcript_file_path:
-            transcript_content = load_transcript_from_file(job.transcript_file_path)
-        elif job.result:  # Fallback for old records
-            transcript_content = job.result
-            
-        if not transcript_content:
-            raise HTTPException(status_code=404, detail="Transcript content not found")
-        
-        # If we have a file path, serve the file directly
-        if job.transcript_file_path and os.path.exists(job.transcript_file_path):
-            filename = f"transcript_{job.filename.rsplit('.', 1)[0]}.md"
-            return FileResponse(
-                path=job.transcript_file_path,
-                filename=filename,
-                media_type='text/markdown'
-            )
-        else:
-            # Create a temporary file for legacy records
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8')
-            temp_file.write(transcript_content)
-            temp_file.close()
-            
-            filename = f"transcript_{job.filename.rsplit('.', 1)[0]}.md"
-            return FileResponse(
-                path=temp_file.name,
-                filename=filename,
-                media_type='text/markdown'
-            )
+# Routes are now handled by job_routes.py
 
 def main():
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)

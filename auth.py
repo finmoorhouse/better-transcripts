@@ -24,6 +24,7 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True)
     is_superuser: bool = Field(default=False)
     is_verified: bool = Field(default=False)
+    total_api_cost: float = Field(default=0.0)  # Total API usage cost in dollars
 
 
 class UserRead(schemas.BaseUser[uuid.UUID]):
