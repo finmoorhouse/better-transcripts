@@ -17,10 +17,8 @@ import logging
 import random
 import json
 from dotenv import load_dotenv
-import google.genai as genai
-import httpx
-from pydub import AudioSegment
-from pydub.silence import detect_nonsilent
+import assemblyai as aai
+import markdown
 
 # Set up logging with HTTP debugging
 logging.basicConfig(
@@ -31,36 +29,14 @@ logger = logging.getLogger(__name__)
 
 # Enable detailed HTTP logging for debugging API issues
 logging.getLogger("httpx").setLevel(logging.INFO)
-logging.getLogger("google.genai").setLevel(logging.INFO)
 
-# Enable debug-level logging for HTTP requests (shows full request/response details)
-# Uncomment the lines below for even more detailed HTTP debugging:
-# logging.getLogger("httpx").setLevel(logging.DEBUG)
-# logging.getLogger("httpcore").setLevel(logging.DEBUG)
-
-# Set to True to enable verbose HTTP debugging (can be toggled easily)
-VERBOSE_HTTP_DEBUG = os.getenv("VERBOSE_HTTP_DEBUG", "false").lower() == "true"
-if VERBOSE_HTTP_DEBUG:
-    logging.getLogger("httpx").setLevel(logging.DEBUG)
-    logging.getLogger("httpcore").setLevel(logging.DEBUG)
-    logger.info("Verbose HTTP debugging enabled")
-
-# Custom exception for transcription timeouts
-class TranscriptionTimeoutError(Exception):
-    """Custom exception for transcription timeout errors"""
-    pass
 
 # Load environment variables
 load_dotenv()
 
-# Configure Google Gemini API
-from google.genai import types
-client = genai.Client(
-    api_key=os.getenv("GEMINI_KEY"),
-    http_options=types.HttpOptions(
-        timeout=900_000  # 15 minutes in milliseconds
-    )
-)
+# Configure AssemblyAI API
+aai.settings.api_key = os.getenv("ASSEMBLY_KEY")
+transcriber = aai.Transcriber()
 
 # Job status enumeration
 class JobStatus(str, Enum):
@@ -80,6 +56,7 @@ class Job(SQLModel, table=True):
     transcript: Optional[str] = Field(default=None)  # Deprecated - use result instead
     result: Optional[str] = Field(default=None)  # Deprecated - use transcript_file_path instead
     transcript_file_path: Optional[str] = Field(default=None)  # Path to transcript .md file
+    keyterms: Optional[str] = Field(default=None)  # Comma-separated keyterms for transcription
     user_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id", index=True)
     api_cost: Optional[float] = Field(default=None)  # Cost of this job in dollars
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -103,9 +80,15 @@ def create_db_and_tables():
     try:
         SQLModel.metadata.create_all(engine)
     except Exception as e:
-        # If there are issues with existing tables/indexes, drop and recreate
-        SQLModel.metadata.drop_all(engine)
-        SQLModel.metadata.create_all(engine)
+        logger.warning(f"Database creation failed: {e}. Dropping and recreating tables...")
+        try:
+            # If there are issues with existing tables/indexes, drop and recreate
+            SQLModel.metadata.drop_all(engine)
+            SQLModel.metadata.create_all(engine)
+            logger.info("Database tables recreated successfully")
+        except Exception as drop_error:
+            logger.error(f"Failed to recreate database tables: {drop_error}")
+            raise
 
 def get_session():
     with Session(engine) as session:
@@ -165,94 +148,24 @@ def load_transcript_from_file(file_path: str) -> str:
         return ""
 
 def format_transcript_for_display(transcript_text: str) -> str:
-    """Format transcript for display - handle both JSON and plain text."""
+    """Format transcript for display - convert markdown to HTML."""
     try:
-        # Try to parse as JSON and format nicely
+        # Try to parse as JSON (legacy format) and convert to markdown first
         parsed_json = json.loads(transcript_text)
-        return json.dumps(parsed_json, indent=2, ensure_ascii=False)
+        # Convert JSON to markdown format
+        markdown_lines = []
+        for segment in parsed_json:
+            if isinstance(segment, dict) and 'speaker' in segment and 'text' in segment:
+                speaker_text = f"**{segment['speaker']}**: {segment['text'].strip()}"
+                markdown_lines.append(speaker_text)
+        markdown_text = "\n\n".join(markdown_lines)
+        # Convert markdown to HTML
+        return markdown.markdown(markdown_text)
     except json.JSONDecodeError:
-        # If not JSON, return as-is (backwards compatibility)
-        return transcript_text
+        # If not JSON, assume it's already markdown and convert to HTML
+        return markdown.markdown(transcript_text)
 
-def chunk_audio_file(file_path: str, chunk_minutes: int = 20, overlap_minutes: int = 2) -> list[str]:
-    """
-    Split audio file into chunks with overlap for reliable processing.
-    
-    Args:
-        file_path: Path to the audio file
-        chunk_minutes: Target chunk length in minutes (default: 20)
-        overlap_minutes: Overlap between chunks in minutes (default: 2)
-    
-    Returns:
-        List of paths to chunk files
-    """
-    try:
-        logger.info(f"Loading audio file for chunking: {file_path}")
-        
-        # Load audio file
-        audio = AudioSegment.from_file(file_path)
-        total_duration_ms = len(audio)
-        total_minutes = total_duration_ms / (1000 * 60)
-        
-        logger.info(f"Audio duration: {total_minutes:.1f} minutes")
-        
-        # If file is shorter than chunk size, no need to split
-        if total_minutes <= chunk_minutes:
-            logger.info(f"File is {total_minutes:.1f} minutes, shorter than chunk size ({chunk_minutes} min). No splitting needed.")
-            return [file_path]
-        
-        # Convert times to milliseconds
-        chunk_length_ms = chunk_minutes * 60 * 1000
-        overlap_ms = overlap_minutes * 60 * 1000
-        step_size_ms = chunk_length_ms - overlap_ms
-        
-        chunk_paths = []
-        chunk_num = 0
-        start_ms = 0
-        
-        while start_ms < total_duration_ms:
-            chunk_num += 1
-            end_ms = min(start_ms + chunk_length_ms, total_duration_ms)
-            
-            logger.info(f"Creating chunk {chunk_num}: {start_ms/60000:.1f}m - {end_ms/60000:.1f}m")
-            
-            # Extract chunk
-            chunk = audio[start_ms:end_ms]
-            
-            # Generate chunk filename
-            base_name = os.path.splitext(file_path)[0]
-            chunk_path = f"{base_name}_chunk_{chunk_num:03d}.wav"
-            
-            # Export chunk as WAV for consistent format
-            chunk.export(chunk_path, format="wav")
-            chunk_paths.append(chunk_path)
-            
-            logger.info(f"Saved chunk {chunk_num}: {chunk_path}")
-            
-            # Move to next chunk
-            start_ms += step_size_ms
-            
-            # Break if we've reached the end
-            if end_ms >= total_duration_ms:
-                break
-        
-        logger.info(f"Created {len(chunk_paths)} audio chunks")
-        return chunk_paths
-        
-    except Exception as e:
-        logger.error(f"Error chunking audio file {file_path}: {str(e)}")
-        # Return original file if chunking fails
-        return [file_path]
 
-def cleanup_chunk_files(chunk_paths: list[str], original_path: str):
-    """Clean up temporary chunk files, keeping the original."""
-    for chunk_path in chunk_paths:
-        if chunk_path != original_path and os.path.exists(chunk_path):
-            try:
-                os.remove(chunk_path)
-                logger.info(f"Cleaned up chunk: {chunk_path}")
-            except OSError as e:
-                logger.warning(f"Failed to cleanup chunk {chunk_path}: {str(e)}")
 
 def format_local_datetime(utc_dt: datetime) -> str:
     """Convert UTC datetime to local time and format for display."""
@@ -269,205 +182,79 @@ def format_local_datetime(utc_dt: datetime) -> str:
     # Format for display
     return local_dt.strftime('%Y-%m-%d %H:%M')
 
-def prepare_content(uploaded_file, previous_transcript: str = None, chunk_number: int = 1, total_chunks: int = 1) -> list:
-    """Prepare audio file and prompt for transcription with structured output."""
-    audio = types.Part.from_uri(
-        file_uri=uploaded_file.uri,
-        mime_type=uploaded_file.mime_type,
-    )
-    
-    # Base prompt
-    prompt = f"""Generate a detailed diarized transcript for this audio file (chunk {chunk_number} of {total_chunks}). 
-    
-IMPORTANT: Group ALL consecutive speech from the same speaker into a SINGLE JSON entry. Only create a new JSON entry when the speaker changes.
-
-For example:
-- If Speaker 1 talks for 30 seconds continuously, put all their text in ONE entry
-- Only create a new entry when Speaker 2 starts talking
-- Then group all of Speaker 2's consecutive speech into one entry
-- And so on
-
-Remove filler words, repetition, and other non-essential content — the result should be a slightly tidied up and fluent version of the actual speech."""
-
-    # Add context from previous chunks if available
-    if previous_transcript and chunk_number > 1:
-        prompt += f"""
-
-CONTEXT FROM PREVIOUS CHUNKS:
-The speakers from earlier parts of this audio are:
-{previous_transcript}
-
-IMPORTANT: Continue using the SAME speaker numbering as the previous chunks. If "Speaker 1" and "Speaker 2" were speaking in previous chunks, continue using those exact labels for the same people in this chunk. Do NOT restart numbering.
-
-This helps maintain speaker consistency across the entire transcript."""
-
-    text = types.Part.from_text(text=prompt)
-    return [
-        types.Content(
-            role="user",
-            parts=[audio, text]
-        ),
-    ]
-
-def configure_generation() -> types.GenerateContentConfig:
-    """Configure generation with JSON schema for structured response."""
-    # JSON schema for structured response
-    schema = {
-        "type": "ARRAY",
-        "description": "A diarized transcript with speaker changes. Each entry represents ALL consecutive speech from one speaker before switching to another speaker.",
-        "items": {
-            "type": "OBJECT",
-            "properties": {
-                "timestamp": {"type": "STRING", "description": "Start time when this speaker begins (mm:ss format)"},
-                "speaker": {"type": "STRING", "description": "Speaker identifier (e.g., Speaker 1, Speaker 2)"},
-                "text": {"type": "STRING", "description": "All consecutive transcribed text from this speaker until the next speaker begins"}
-            },
-            "required": ["speaker", "text"]
-        }
+def create_assemblyai_config(keyterms: Optional[list] = None) -> aai.TranscriptionConfig:
+    """Create AssemblyAI transcription configuration with speaker diarization."""
+    config_params = {
+        'speech_model': 'slam-1',  # Use SLAM-1 speech model
+        'speaker_labels': True,  # Enable speaker diarization
+        'auto_highlights': False,
+        'iab_categories': False,
+        'content_safety': False,
+        'summarization': False,
+        'punctuate': True,
+        'format_text': True
     }
 
-    # Config params
-    return types.GenerateContentConfig(
-        temperature=1.0,
-        top_p=0.95,
-        seed=0,
-        max_output_tokens=32768,
-        response_modalities=["TEXT"],
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
+    # Only add keyterms_prompt if keyterms are provided
+    if keyterms:
+        config_params['keyterms_prompt'] = keyterms
 
-def process_single_chunk(uploaded_file, chunk_number: int, total_chunks: int, previous_transcript: str = None) -> str:
-    """Process a single audio chunk and return the transcript with robust retry logic."""
-    max_retries = 5  # Increased from 3 to 5 for connection issues
-    base_delay = 3  # Start with 3 second delay
-    
-    for attempt in range(max_retries):
-        try:
-            # Prepare structured transcription request with context
-            contents = prepare_content(uploaded_file, previous_transcript, chunk_number, total_chunks)
-            config = configure_generation()
-            
-            logger.info(f"Starting transcription for chunk {chunk_number}/{total_chunks} (attempt {attempt + 1}/{max_retries})")
-            
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=contents,
-                config=config
-            )
-            transcript_text = response.text.strip()
-            
-            # Validate JSON response
-            try:
-                json.loads(transcript_text)
-                logger.info(f"Valid JSON response received for chunk {chunk_number}")
-            except json.JSONDecodeError as json_err:
-                logger.warning(f"Response is not valid JSON for chunk {chunk_number}: {json_err}")
-            
-            return transcript_text
-            
-        except Exception as api_e:
-            error_message = str(api_e)
-            error_type = type(api_e).__name__
-            
-            # Log full exception details for debugging
-            logger.error(f"Exception details for chunk {chunk_number}: {error_type}: {error_message}")
-            if hasattr(api_e, 'response') and api_e.response is not None:
-                logger.error(f"HTTP Response status: {api_e.response.status_code}")
-                logger.error(f"HTTP Response headers: {dict(api_e.response.headers)}")
-                if hasattr(api_e.response, 'text'):
-                    logger.error(f"HTTP Response body: {api_e.response.text[:500]}")  # First 500 chars
-            
-            # Check if this is a retryable error (connection issues, 503, rate limits, etc.)
-            is_retryable = (
-                isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)) or
-                "503" in error_message or 
-                "overloaded" in error_message.lower() or
-                "rate limit" in error_message.lower() or
-                "too many requests" in error_message.lower() or
-                "unavailable" in error_message.lower() or
-                "server disconnected" in error_message.lower() or
-                "connection" in error_message.lower()
-            )
-            
-            if is_retryable and attempt < max_retries - 1:
-                # Exponential backoff with jitter for connection issues
-                if isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)):
-                    delay = base_delay * (2 ** attempt) + random.uniform(2, 5)  # Longer delay for connection issues
-                    logger.warning(f"Connection error for chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {error_type}: {error_message}")
-                else:
-                    delay = base_delay * (2 ** attempt) + random.uniform(1, 3)
-                    logger.warning(f"Retryable error for chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {error_type}: {error_message}")
-                
-                logger.info(f"Retrying chunk {chunk_number} in {delay:.1f} seconds...")
-                time.sleep(delay)
-                continue
-            else:
-                # Only raise timeout error if we've exhausted all retries on connection issues
-                if isinstance(api_e, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException)):
-                    logger.error(f"HTTP timeout/disconnect during transcription for chunk {chunk_number} after {max_retries} attempts: {error_type}: {api_e}")
-                    raise TranscriptionTimeoutError(
-                        f"Transcription timed out for chunk {chunk_number} after {max_retries} attempts. Consider using smaller chunks."
-                    ) from api_e
-                else:
-                    logger.error(f"API error during transcription for chunk {chunk_number} after {max_retries} attempts: {error_type}: {api_e}")
-                    raise
-    
-    # Should never reach here due to the raise in the except block
-    raise Exception(f"Failed to process chunk {chunk_number} after {max_retries} attempts")
+    config = aai.TranscriptionConfig(**config_params)
+    return config
 
-def merge_chunk_transcripts(chunk_transcripts: list[str], overlap_minutes: int = 2) -> str:
-    """Merge multiple chunk transcripts, removing overlaps and aligning speakers."""
-    if not chunk_transcripts:
-        return ""
-    
-    if len(chunk_transcripts) == 1:
-        return chunk_transcripts[0]
-    
+def format_assemblyai_transcript(transcript: aai.Transcript) -> str:
+    """Format AssemblyAI transcript with speaker diarization into markdown."""
     try:
-        merged_segments = []
+        markdown_lines = []
         
-        for i, chunk_transcript in enumerate(chunk_transcripts):
-            try:
-                chunk_json = json.loads(chunk_transcript)
-                logger.info(f"Processing chunk {i+1} with {len(chunk_json)} segments")
-                
-                if i == 0:
-                    # First chunk - add all segments
-                    merged_segments.extend(chunk_json)
-                else:
-                    # Subsequent chunks - skip overlapping content
-                    # For now, add all segments (overlap removal can be enhanced later)
-                    for segment in chunk_json:
-                        # Simple duplicate removal - skip if text matches last few segments
-                        duplicate = False
-                        for recent_segment in merged_segments[-3:]:  # Check last 3 segments
-                            if segment.get('text', '').strip() == recent_segment.get('text', '').strip():
-                                duplicate = True
-                                logger.info(f"Skipping duplicate segment: {segment.get('text', '')[:50]}...")
-                                break
-                        
-                        if not duplicate:
-                            merged_segments.append(segment)
-                            
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse chunk {i+1} as JSON: {e}")
-                # If JSON parsing fails, treat as plain text
-                if i == 0:
-                    merged_segments.append({"speaker": "Speaker 1", "text": chunk_transcript})
-                else:
-                    merged_segments.append({"speaker": "Unknown", "text": chunk_transcript})
+        if transcript.utterances:
+            # Use speaker-diarized utterances if available
+            for utterance in transcript.utterances:
+                speaker_text = f"**{utterance.speaker}**: {utterance.text.strip()}"
+                markdown_lines.append(speaker_text)
+        else:
+            # Fallback to full transcript without speaker info
+            speaker_text = f"**Speaker A**: {transcript.text}"
+            markdown_lines.append(speaker_text)
         
-        logger.info(f"Merged {len(chunk_transcripts)} chunks into {len(merged_segments)} total segments")
-        return json.dumps(merged_segments, indent=2, ensure_ascii=False)
+        # Join with double newlines (blank line between speakers)
+        return "\n\n".join(markdown_lines)
         
     except Exception as e:
-        logger.error(f"Error merging chunk transcripts: {e}")
-        # Fallback - concatenate all transcripts
-        return "\n\n=== CHUNK SEPARATOR ===\n\n".join(chunk_transcripts)
+        logger.error(f"Error formatting transcript: {e}")
+        # Fallback to plain text
+        return transcript.text if transcript.text else ""
+
+def process_audio_with_assemblyai(file_path: str, keyterms: Optional[list] = None) -> str:
+    """Process audio file with AssemblyAI and return formatted transcript."""
+    try:
+        logger.info(f"Starting AssemblyAI transcription for: {file_path}")
+
+        # Create transcription config with speaker diarization and keyterms
+        config = create_assemblyai_config(keyterms=keyterms)
+
+        # Transcribe the audio file
+        transcript = transcriber.transcribe(file_path, config=config)
+        
+        # Check for errors
+        if transcript.error:
+            logger.error(f"AssemblyAI transcription error: {transcript.error}")
+            raise Exception(f"Transcription failed: {transcript.error}")
+        
+        logger.info(f"AssemblyAI transcription completed for: {file_path}")
+        
+        # Format the transcript with speaker diarization
+        formatted_transcript = format_assemblyai_transcript(transcript)
+        
+        return formatted_transcript
+        
+    except Exception as e:
+        logger.error(f"Error processing audio with AssemblyAI: {str(e)}")
+        raise
+
 
 def process_transcription(job_id: int):
-    """Background task to transcribe audio using Google Gemini API."""
+    """Background task to transcribe audio using AssemblyAI API."""
     # Get job details and file path first
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -482,79 +269,19 @@ def process_transcription(job_id: int):
         file_path = job.file_path
         filename = job.filename
         user_id = job.user_id
-    
-    # Process the transcription without holding database connections
-    chunk_paths = []
+        keyterms_str = job.keyterms
+
     try:
-        logger.info(f"Starting chunked transcription for job {job_id}: {filename}")
-        
-        # Step 1: Split audio into chunks
-        chunk_paths = chunk_audio_file(file_path, chunk_minutes=15, overlap_minutes=2)
-        logger.info(f"Created {len(chunk_paths)} chunks for processing")
-        
-        # Step 2: Process chunks sequentially with context
-        chunk_transcripts = []
-        combined_previous_transcript = ""
-        
-        for i, chunk_path in enumerate(chunk_paths):
-            chunk_number = i + 1
-            total_chunks = len(chunk_paths)
-            
-            logger.info(f"Processing chunk {chunk_number}/{total_chunks}: {os.path.basename(chunk_path)}")
-            
-            try:
-                # Upload chunk to Gemini
-                uploaded_file = client.files.upload(file=chunk_path)
-                logger.info(f"Chunk {chunk_number} uploaded to Gemini: {uploaded_file.name}")
-                
-                # Process chunk with context from previous chunks
-                chunk_transcript = process_single_chunk(
-                    uploaded_file, 
-                    chunk_number, 
-                    total_chunks, 
-                    combined_previous_transcript if chunk_number > 1 else None
-                )
-                
-                chunk_transcripts.append(chunk_transcript)
-                logger.info(f"Chunk {chunk_number} transcription completed")
-                
-                # Update combined context for next chunk (keep it concise)
-                try:
-                    chunk_json = json.loads(chunk_transcript)
-                    # Keep last few segments as context
-                    recent_segments = chunk_json[-2:] if len(chunk_json) > 2 else chunk_json
-                    combined_previous_transcript = json.dumps(recent_segments, indent=2)
-                except json.JSONDecodeError:
-                    # If not JSON, use text directly but keep it short
-                    combined_previous_transcript = chunk_transcript[-500:] if len(chunk_transcript) > 500 else chunk_transcript
-                
-                # Clean up uploaded file from Gemini
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                    logger.info(f"Deleted chunk {chunk_number} from Gemini: {uploaded_file.name}")
-                except Exception as cleanup_e:
-                    logger.warning(f"Failed to cleanup chunk {chunk_number} from Gemini: {cleanup_e}")
-                
-                # Add delay between chunks to avoid overwhelming the API and reduce connection issues
-                if chunk_number < total_chunks:  # Don't delay after the last chunk
-                    delay = 3 + random.uniform(1.0, 2.0)  # 4-5 second delay (increased)
-                    logger.info(f"Waiting {delay:.1f}s before processing next chunk...")
-                    time.sleep(delay)
-                
-            except TranscriptionTimeoutError:
-                logger.error(f"Chunk {chunk_number} timed out - aborting remaining chunks")
-                raise
-            except Exception as chunk_e:
-                logger.error(f"Error processing chunk {chunk_number}: {str(chunk_e)}")
-                raise
-        
-        # Step 3: Merge all chunk transcripts
-        logger.info("Merging chunk transcripts...")
-        transcript_text = merge_chunk_transcripts(chunk_transcripts, overlap_minutes=2)
-        logger.info(f"Chunked transcription completed for job {job_id}")
-        
-        # Clean up chunk files
-        cleanup_chunk_files(chunk_paths, file_path)
+        logger.info(f"Starting AssemblyAI transcription for job {job_id}: {filename}")
+
+        # Parse keyterms from comma-separated string to list
+        keyterms = None
+        if keyterms_str and keyterms_str.strip():
+            keyterms = [term.strip() for term in keyterms_str.split(',') if term.strip()]
+
+        # Process the entire audio file with AssemblyAI (no chunking needed)
+        transcript_text = process_audio_with_assemblyai(file_path, keyterms=keyterms)
+        logger.info(f"AssemblyAI transcription completed for job {job_id}")
         
         # Save transcript to file
         transcript_file_path = save_transcript_to_file(job_id, transcript_text)
@@ -567,7 +294,7 @@ def process_transcription(job_id: int):
             logger.warning(f"Failed to delete original audio file {file_path}: {str(e)}")
         
         # For now, use a small fixed cost - you can implement actual cost calculation later
-        api_cost = 0.50  # Placeholder cost
+        api_cost = 0.25  # Reduced cost for AssemblyAI
         
         # Single database operation: update job completion and clear file path
         with Session(engine) as session:
@@ -588,28 +315,8 @@ def process_transcription(job_id: int):
                 session.commit()
                 logger.info(f"Job {job_id} completed successfully")
         
-    except TranscriptionTimeoutError as timeout_e:
-        logger.error(f"Transcription timeout for job {job_id}: {str(timeout_e)}")
-        # Clean up chunk files on timeout
-        if chunk_paths:
-            cleanup_chunk_files(chunk_paths, file_path)
-        # Handle timeout failure with a fresh session - mark as failed with timeout message
-        try:
-            with Session(engine) as session:
-                job = session.get(Job, job_id)
-                if job:
-                    job.status = JobStatus.failed
-                    job.completed_at = datetime.utcnow()
-                    # Could add a timeout-specific error field here in future
-                    session.commit()
-                    logger.info(f"Job {job_id} marked as failed due to timeout")
-        except Exception as cleanup_error:
-            logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
     except Exception as e:
         logger.error(f"Transcription failed for job {job_id}: {str(e)}")
-        # Clean up chunk files on general error
-        if chunk_paths:
-            cleanup_chunk_files(chunk_paths, file_path)
         # Handle general failure with a fresh session
         try:
             with Session(engine) as session:
@@ -621,7 +328,7 @@ def process_transcription(job_id: int):
         except Exception as cleanup_error:
             logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
 
-# Removed old streaming code - now using chunked non-streaming approach
+# Removed old Gemini streaming code - now using AssemblyAI
 
 app = FastAPI(title="Better Transcripts", description="High-quality formatted transcripts")
 

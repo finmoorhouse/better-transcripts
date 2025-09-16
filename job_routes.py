@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, File, UploadFile, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, Request, File, UploadFile, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from sqlmodel import Session, select
 from auth import current_active_user, User
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Dependencies imported locally within functions to avoid circular import
 
 @router.post("/jobs/add")
-async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), user: User = Depends(current_active_user)):
+async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), keyterms: str = Form(""), user: User = Depends(current_active_user)):
     # Local imports to avoid circular import
     from main import engine, Job, JobStatus, validate_audio_file, save_uploaded_file, process_transcription
     
@@ -28,7 +28,8 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
     
     with Session(engine) as session:
         # Create job first to get ID
-        db_job = Job(filename=file.filename, status=JobStatus.processing, user_id=user.id)
+        keyterms_cleaned = keyterms.strip() if keyterms else None
+        db_job = Job(filename=file.filename, status=JobStatus.processing, user_id=user.id, keyterms=keyterms_cleaned)
         session.add(db_job)
         session.commit()
         session.refresh(db_job)
@@ -145,8 +146,8 @@ async def get_job_detail(job_id: int, user: User = Depends(current_active_user))
                 <div class='mt-6'>
                     <h3 class='text-lg font-semibold mb-3'>Transcription Result</h3>
                     {download_button}
-                    <div class='bg-gray-50 p-4 rounded-lg border'>
-                        <pre class='whitespace-pre-wrap text-sm leading-relaxed overflow-y-auto font-serif'>{formatted_transcript}</pre>
+                    <div class='w-full'>
+                        <div class='text-base leading-relaxed overflow-y-auto prose prose-base max-w-none font-serif'>{formatted_transcript}</div>
                     </div>
                 </div>
             """
@@ -215,7 +216,7 @@ async def get_job_detail(job_id: int, user: User = Depends(current_active_user))
                     </div>
                 </div>
                 
-                <div class='border-t pt-6'>
+                <div class='border-t pt-6 mb-6'>
                     <h3 class='text-lg font-semibold mb-3'>Job Details</h3>
                     <div class='grid grid-cols-2 gap-4 text-sm'>
                         <div>
@@ -232,7 +233,7 @@ async def get_job_detail(job_id: int, user: User = Depends(current_active_user))
                         {"<div><span class='font-medium text-gray-600'>Transcript File:</span><span class='ml-2 text-xs text-gray-500'>" + job.transcript_file_path + "</span></div>" if job.transcript_file_path else ""}
                     </div>
                 </div>
-                
+                <hr/>
                 {transcript_section}
             </div>
             
@@ -344,7 +345,22 @@ async def get_job_list_view(user: User = Depends(current_active_user)):
                                     file:text-sm file:border-flexoki-ui-3 file:font-semibold file:bg-flexoki-bl file:text-white
                                     hover:file:bg-flexoki-bl-2 file:cursor-pointer'>
                                 <p class='text-sm text-flexoki-tx-3/70'>Support for .wav and .mp3 files up to 100MB</p>
-                                
+
+                                <!-- Key Terms Input -->
+                                <div class='w-full pt-4'>
+                                    <label class='block text-sm font-medium text-flexoki-tx mb-2'>Key Terms (optional)</label>
+                                    <textarea
+                                        name='keyterms'
+                                        id='keyterms-input'
+                                        placeholder='Enter key terms separated by commas (e.g., AI, machine learning, API)'
+                                        rows='2'
+                                        oninput='updateKeyTermsPills()'
+                                        class='w-full p-3 border border-flexoki-ui-3 rounded-md text-sm text-flexoki-tx bg-flexoki-paper focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:border-transparent resize-none'></textarea>
+                                    <!-- Pills container -->
+                                    <div id='keyterms-pills' class='mt-2 flex flex-wrap gap-2 min-h-[24px]'></div>
+                                    <p class='text-xs text-flexoki-tx-3/70 mt-1'>Help improve transcription accuracy for domain-specific terms</p>
+                                </div>
+
                                 <!-- Simple Upload Indicator -->
                                 <div id='upload-indicator' class='hidden'>
                                     <div class='flex items-center justify-center space-x-2 text-flexoki-bl'>
@@ -404,14 +420,35 @@ async def get_job_list_view(user: User = Depends(current_active_user)):
             function hideUploadProgress(event) {{
                 const indicator = document.getElementById('upload-indicator');
                 const button = document.getElementById('upload-button');
-                
+
                 // Hide upload indicator
                 indicator.classList.add('hidden');
-                
+
                 // Re-enable button
                 button.disabled = false;
                 button.textContent = 'Upload & Create Job';
                 button.classList.remove('opacity-75', 'cursor-not-allowed');
+            }}
+
+            function updateKeyTermsPills() {{
+                const input = document.getElementById('keyterms-input');
+                const pillsContainer = document.getElementById('keyterms-pills');
+
+                if (!input || !pillsContainer) return;
+
+                const text = input.value.trim();
+                pillsContainer.innerHTML = '';
+
+                if (text) {{
+                    const terms = text.split(',').map(term => term.trim()).filter(term => term.length > 0);
+
+                    terms.forEach(term => {{
+                        const pill = document.createElement('span');
+                        pill.className = 'inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full bg-flexoki-bl bg-opacity-10 text-flexoki-bl border border-flexoki-bl border-opacity-20';
+                        pill.textContent = term;
+                        pillsContainer.appendChild(pill);
+                    }});
+                }}
             }}
         </script>
     """

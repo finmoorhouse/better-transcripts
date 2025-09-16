@@ -5,10 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "assemblyai>=0.43.1",
     "fastapi-users-db-sqlmodel>=0.3.0",
     "fastapi-users>=14.0.1",
     "fastapi[standard]>=0.116.1",
     "google-genai>=1.35.0",
+    "markdown>=3.9",
     "pydub>=0.25.1",
     "sqlmodel>=0.0.24",
 ]

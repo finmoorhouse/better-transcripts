@@ -9,7 +9,7 @@ The author is me, [Fin](https://github.com/finmoorhouse?tab=repositories) (and C
 Currently, Better Transcripts works as follows:
 
 - The user can upload a `.wav` or `.mp3` file containing audio to be transcribed
-- The file is sent to the transcription API (in batches if necessary)
+- The file is sent to the AssemblyAI transcription API
 - The result is returned to the user
 
 ## Stack
@@ -20,7 +20,7 @@ Better Transcripts (currently) uses the following tools:
 - [HTMX](https://htmx.org/) as the main framework
 - [Tailwind](https://tailwindcss.com/) for styling
 - [SQLModel](https://sqlmodel.tiangolo.com) for DB management
-- [Google Gemini](https://ai.google.dev/) as the transcription model
+- [AssemblyAI](https://www.assemblyai.com/) as the transcription API
 
 ## Getting Started
 
