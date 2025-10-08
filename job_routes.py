@@ -108,6 +108,9 @@ async def get_job_detail(job_id: int, request: Request, user: User = Depends(cur
     from main import engine, Job, JobStatus, load_transcript_from_file, format_transcript_for_display, extract_speakers_from_transcript, strip_file_extension
     from datetime import timezone
 
+    # Check if this is an HTMX request or a direct browser visit
+    is_htmx_request = request.headers.get("HX-Request") == "true"
+
     with Session(engine) as session:
         job = session.get(Job, job_id)
         if not job or job.user_id != user.id:
@@ -147,25 +150,32 @@ async def get_job_detail(job_id: int, request: Request, user: User = Depends(cur
             # Format completion time as HH:MM only
             completed_time = job.completed_at.astimezone().strftime('%H:%M') if job.completed_at.tzinfo else job.completed_at.replace(tzinfo=timezone.utc).astimezone().strftime('%H:%M')
 
-        return templates.TemplateResponse(
-            "partials/job_detail.html",
-            {
-                "request": request,
-                "job": job,
-                "display_name": display_name,
-                "status_color": status_color,
-                "transcript_content": transcript_content,
-                "formatted_transcript": formatted_transcript,
-                "speakers": speakers,
-                "created_natural": created_natural,
-                "completed_time": completed_time,
-            }
-        )
+        context = {
+            "request": request,
+            "job": job,
+            "display_name": display_name,
+            "status_color": status_color,
+            "transcript_content": transcript_content,
+            "formatted_transcript": formatted_transcript,
+            "speakers": speakers,
+            "created_natural": created_natural,
+            "completed_time": completed_time,
+        }
+
+        # If direct browser visit, wrap in full page layout
+        if not is_htmx_request:
+            return templates.TemplateResponse("job_detail_page.html", context)
+
+        # If HTMX request, return just the partial
+        return templates.TemplateResponse("partials/job_detail.html", context)
 
 @router.get("/jobs")
 async def get_job_list_view(request: Request, user: User = Depends(current_active_user)):
     from main import engine, Job, JobStatus, strip_file_extension
     from datetime import timezone
+
+    # Check if this is an HTMX request or a direct browser visit
+    is_htmx_request = request.headers.get("HX-Request") == "true"
 
     with Session(engine) as session:
         jobs_raw = session.exec(select(Job).where(Job.user_id == user.id).order_by(Job.created_at.desc())).all()
@@ -194,13 +204,17 @@ async def get_job_list_view(request: Request, user: User = Depends(current_activ
                 "created_natural": created_natural
             })
 
-        return templates.TemplateResponse(
-            "partials/job_list_view.html",
-            {
-                "request": request,
-                "jobs": jobs_data
-            }
-        )
+        context = {
+            "request": request,
+            "jobs": jobs_data
+        }
+
+        # If direct browser visit, wrap in full page layout
+        if not is_htmx_request:
+            return templates.TemplateResponse("job_list_page.html", context)
+
+        # If HTMX request, return just the partial
+        return templates.TemplateResponse("partials/job_list_view.html", context)
 
 @router.get("/jobs/{job_id}/download")
 async def download_transcript(job_id: int, user: User = Depends(current_active_user)):

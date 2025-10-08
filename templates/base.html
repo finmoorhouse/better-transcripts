@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Better Transcripts{% endblock %}</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 120 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+    <script src="/static/js/htmx.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/static/js/tailwind-config.js"></script>
+</head>
+<body class="bg-flexoki-ui min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-semibold text-flexoki-tx-3"><a href="/">Better Transcripts</a></h1>
+            <div id="auth-status" {% block auth_trigger %}hx-get="/auth-status" hx-trigger="load"{% endblock %} class="flex gap-2">
+                <!-- Auth status will be loaded here -->
+            </div>
+        </div>
+
+        <div id="main-content" {% block main_content_attrs %}hx-get="/check-auth" hx-trigger="load"{% endblock %} hx-history-elt>
+            {% block content %}
+            Loading...
+            {% endblock %}
+        </div>
+    </div>
+</body>
+</html>

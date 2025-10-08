@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}Login Required - Better Transcripts{% endblock %}
+
+{% block main_content_attrs %}{% endblock %}
+
+{% block content %}
+<div class="max-w-md mx-auto bg-flexoki-paper-light rounded-lg border border-flexoki-ui-3 p-6 text-center shadow-sm">
+    <h2 class="text-2xl font-semibold mb-2 text-flexoki-tx text-left">Authentication Required</h2>
+    <p class="text-flexoki-tx-3 mb-6 text-left">You need to be logged in to access this page.</p>
+    <div class="space-y-3">
+        <a href="/login" class="block w-full bg-flexoki-bl hover:bg-flexoki-bl-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
+            Login
+        </a>
+        <a href="/register" class="block w-full bg-flexoki-or hover:bg-flexoki-or-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
+            Register
+        </a>
+    </div>
+</div>
+{% endblock %}

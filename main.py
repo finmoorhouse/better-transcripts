@@ -84,17 +84,11 @@ engine = create_engine(DATABASE_URL)
 
 def create_db_and_tables():
     try:
-        SQLModel.metadata.create_all(engine)
+        SQLModel.metadata.create_all(engine, checkfirst=True)
+        logger.info("Database tables created/verified successfully")
     except Exception as e:
-        logger.warning(f"Database creation failed: {e}. Dropping and recreating tables...")
-        try:
-            # If there are issues with existing tables/indexes, drop and recreate
-            SQLModel.metadata.drop_all(engine)
-            SQLModel.metadata.create_all(engine)
-            logger.info("Database tables recreated successfully")
-        except Exception as drop_error:
-            logger.error(f"Failed to recreate database tables: {drop_error}")
-            raise
+        logger.error(f"Database creation failed: {e}")
+        raise
 
 def get_session():
     with Session(engine) as session:
@@ -608,6 +602,48 @@ app = FastAPI(title="Better Transcripts", description="High-quality formatted tr
 
 # Import authentication after app creation to avoid circular imports
 from auth import auth_backend, fastapi_users, current_active_user, User, UserRead, UserCreate
+
+# Custom exception handler for 401 Unauthorized
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 401:
+        # Check if this is an HTMX request
+        is_htmx_request = request.headers.get("HX-Request") == "true"
+
+        unauthorized_html = """
+            <div class="max-w-md mx-auto bg-flexoki-paper-light rounded-lg border border-flexoki-ui-3 p-6 text-center shadow-sm">
+                <h2 class="text-2xl font-semibold mb-2 text-flexoki-tx text-left">Authentication Required</h2>
+                <p class="text-flexoki-tx-3 mb-6 text-left">You need to be logged in to access this page.</p>
+                <div class="space-y-3">
+                    <a href="/login" class="block w-full bg-flexoki-bl hover:bg-flexoki-bl-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
+                        Login
+                    </a>
+                    <a href="/register" class="block w-full bg-flexoki-or hover:bg-flexoki-or-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
+                        Register
+                    </a>
+                </div>
+            </div>
+        """
+
+        if is_htmx_request:
+            # For HTMX requests, return just the fragment
+            return HTMLResponse(content=unauthorized_html, status_code=401)
+        else:
+            # For direct browser visits, return full page
+            from fastapi.templating import Jinja2Templates
+            templates = Jinja2Templates(directory="templates")
+            return templates.TemplateResponse(
+                "unauthorized.html",
+                {"request": request},
+                status_code=401
+            )
+
+    # For other HTTP exceptions, use default JSON response
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 @app.on_event("startup")
 def on_startup():
