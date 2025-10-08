@@ -683,7 +683,11 @@ app.include_router(job_router)
 # Routes are now handled by job_routes.py
 
 def main():
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    # Check if we're in development or production
+    environment = os.getenv("ENVIRONMENT", "production")
+    is_dev = environment == "development"
+    logger.info(f"Starting server in {environment} mode (reload={is_dev})")
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=is_dev)
 
 if __name__ == "__main__":
     main()
