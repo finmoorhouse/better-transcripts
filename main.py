@@ -600,9 +600,6 @@ def process_transcription(job_id: int):
 
 app = FastAPI(title="Better Transcripts", description="High-quality formatted transcripts")
 
-# Import authentication after app creation to avoid circular imports
-from auth import auth_backend, fastapi_users, current_active_user, User, UserRead, UserCreate
-
 # Custom exception handler for 401 Unauthorized
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -647,10 +644,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.on_event("startup")
 def on_startup():
+    # Import User model here to ensure it's registered before creating tables
+    from auth import User
     create_db_and_tables()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+# Import authentication after app creation to avoid circular imports
+from auth import auth_backend, fastapi_users, current_active_user, User, UserRead, UserCreate
 
 # Include authentication routes
 app.include_router(
