@@ -16,7 +16,6 @@ engine = None
 
 
 class User(SQLModel, table=True):
-    __table_args__ = {'extend_existing': True}
     id: Optional[uuid.UUID] = Field(default_factory=uuid.uuid4, primary_key=True)
     email: str = Field(unique=True, index=True, max_length=320)
     name: str = Field(max_length=100)

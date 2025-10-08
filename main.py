@@ -52,7 +52,6 @@ class JobStatus(str, Enum):
 
 # SQLModel Job model
 class Job(SQLModel, table=True):
-    __table_args__ = {'extend_existing': True}
     id: Optional[int] = Field(default=None, primary_key=True)
     filename: str = Field(index=True)
     file_path: Optional[str] = Field(default=None)  # Path to uploaded audio file
