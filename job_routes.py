@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 @router.post("/jobs/add")
 async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), keyterms: str = Form(""), custom_instructions: str = Form(""), user: User = Depends(current_active_user)):
     # Local imports to avoid circular import
-    from main import engine, Job, JobStatus, validate_audio_file, save_uploaded_file, process_transcription
+    from main import engine, validate_audio_file, save_uploaded_file, process_transcription
+    from models import Job, JobStatus
 
     # Validate file
     error_msg = validate_audio_file(file)
@@ -64,7 +65,8 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
 
 @router.get("/jobs/list")
 async def list_jobs(request: Request, user: User = Depends(current_active_user)):
-    from main import engine, Job, JobStatus, strip_file_extension
+    from main import engine, strip_file_extension
+    from models import Job, JobStatus
     from datetime import timezone
 
     with Session(engine) as session:
@@ -105,7 +107,8 @@ async def list_jobs(request: Request, user: User = Depends(current_active_user))
 @router.get("/jobs/{job_id}")
 async def get_job_detail(job_id: int, request: Request, user: User = Depends(current_active_user)):
     # Local import to avoid circular import
-    from main import engine, Job, JobStatus, load_transcript_from_file, format_transcript_for_display, extract_speakers_from_transcript, strip_file_extension
+    from main import engine, load_transcript_from_file, format_transcript_for_display, extract_speakers_from_transcript, strip_file_extension
+    from models import Job, JobStatus
     from datetime import timezone
 
     # Check if this is an HTMX request or a direct browser visit
@@ -171,7 +174,8 @@ async def get_job_detail(job_id: int, request: Request, user: User = Depends(cur
 
 @router.get("/jobs")
 async def get_job_list_view(request: Request, user: User = Depends(current_active_user)):
-    from main import engine, Job, JobStatus, strip_file_extension
+    from main import engine, strip_file_extension
+    from models import Job, JobStatus
     from datetime import timezone
 
     # Check if this is an HTMX request or a direct browser visit
@@ -219,7 +223,8 @@ async def get_job_list_view(request: Request, user: User = Depends(current_activ
 @router.get("/jobs/{job_id}/download")
 async def download_transcript(job_id: int, user: User = Depends(current_active_user)):
     # Local import to avoid circular import
-    from main import engine, Job, JobStatus, load_transcript_from_file
+    from main import engine, load_transcript_from_file
+    from models import Job, JobStatus
     
     with Session(engine) as session:
         job = session.get(Job, job_id)
@@ -262,7 +267,8 @@ async def download_transcript(job_id: int, user: User = Depends(current_active_u
 @router.post("/jobs/{job_id}/rename-speakers")
 async def rename_speakers(job_id: int, request: Request, user: User = Depends(current_active_user)):
     """Rename speakers in the transcript."""
-    from main import engine, Job, load_transcript_from_file, extract_speakers_from_transcript
+    from main import engine, load_transcript_from_file, extract_speakers_from_transcript
+    from models import Job
     import re
 
     # Get form data
@@ -332,7 +338,8 @@ async def rename_speakers(job_id: int, request: Request, user: User = Depends(cu
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: int, user: User = Depends(current_active_user)):
     """Delete a job and clean up associated files."""
-    from main import engine, Job, JobStatus
+    from main import engine
+    from models import Job, JobStatus
     
     with Session(engine) as session:
         job = session.get(Job, job_id)
