@@ -18,6 +18,7 @@ import random
 import json
 from dotenv import load_dotenv
 import assemblyai as aai
+import openai
 import markdown
 
 # Set up logging with HTTP debugging
@@ -38,6 +39,10 @@ load_dotenv()
 aai.settings.api_key = os.getenv("ASSEMBLY_KEY")
 transcriber = aai.Transcriber()
 
+# Configure OpenAI API
+openai.api_key = os.getenv("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 # Job status enumeration
 class JobStatus(str, Enum):
     pending = "pending"
@@ -57,6 +62,7 @@ class Job(SQLModel, table=True):
     result: Optional[str] = Field(default=None)  # Deprecated - use transcript_file_path instead
     transcript_file_path: Optional[str] = Field(default=None)  # Path to transcript .md file
     keyterms: Optional[str] = Field(default=None)  # Comma-separated keyterms for transcription
+    custom_instructions: Optional[str] = Field(default=None)  # Custom instructions for GPT-5 processing
     user_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id", index=True)
     api_cost: Optional[float] = Field(default=None)  # Cost of this job in dollars
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -147,6 +153,21 @@ def load_transcript_from_file(file_path: str) -> str:
     except FileNotFoundError:
         return ""
 
+def extract_speakers_from_transcript(transcript_text: str) -> list[str]:
+    """Extract unique speaker labels from transcript using regex."""
+    import re
+    # Match speaker labels in format **SpeakerName**:
+    pattern = r'\*\*([^*]+)\*\*:'
+    matches = re.findall(pattern, transcript_text)
+    # Return unique speakers in order of first appearance
+    seen = set()
+    unique_speakers = []
+    for speaker in matches:
+        if speaker not in seen:
+            seen.add(speaker)
+            unique_speakers.append(speaker)
+    return unique_speakers
+
 def format_transcript_for_display(transcript_text: str) -> str:
     """Format transcript for display - convert markdown to HTML."""
     try:
@@ -159,26 +180,32 @@ def format_transcript_for_display(transcript_text: str) -> str:
                 speaker_text = f"**{segment['speaker']}**: {segment['text'].strip()}"
                 markdown_lines.append(speaker_text)
         markdown_text = "\n\n".join(markdown_lines)
-        # Convert markdown to HTML
-        return markdown.markdown(markdown_text)
+        # Convert markdown to HTML with extensions
+        return markdown.markdown(markdown_text, extensions=['extra', 'toc'])
     except json.JSONDecodeError:
-        # If not JSON, assume it's already markdown and convert to HTML
-        return markdown.markdown(transcript_text)
+        # If not JSON, assume it's already markdown and convert to HTML with extensions
+        return markdown.markdown(transcript_text, extensions=['extra', 'toc'])
 
 
+
+def strip_file_extension(filename: str) -> str:
+    """Remove file extension from filename for display."""
+    if '.' in filename:
+        return filename.rsplit('.', 1)[0]
+    return filename
 
 def format_local_datetime(utc_dt: datetime) -> str:
     """Convert UTC datetime to local time and format for display."""
     if utc_dt is None:
         return ""
-    
+
     # Ensure the datetime is timezone-aware (UTC)
     if utc_dt.tzinfo is None:
         utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-    
+
     # Convert to local time
     local_dt = utc_dt.astimezone()
-    
+
     # Format for display
     return local_dt.strftime('%Y-%m-%d %H:%M')
 
@@ -206,20 +233,27 @@ def format_assemblyai_transcript(transcript: aai.Transcript) -> str:
     """Format AssemblyAI transcript with speaker diarization into markdown."""
     try:
         markdown_lines = []
-        
+
         if transcript.utterances:
             # Use speaker-diarized utterances if available
             for utterance in transcript.utterances:
-                speaker_text = f"**{utterance.speaker}**: {utterance.text.strip()}"
+                # Convert milliseconds to HH:MM:SS format
+                total_seconds = utterance.start // 1000
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                timestamp = f"[{hours:02d}:{minutes:02d}:{seconds:02d}]"
+
+                speaker_text = f"{timestamp} **{utterance.speaker}**: {utterance.text.strip()}"
                 markdown_lines.append(speaker_text)
         else:
             # Fallback to full transcript without speaker info
-            speaker_text = f"**Speaker A**: {transcript.text}"
+            speaker_text = f"[00:00:00] **Speaker A**: {transcript.text}"
             markdown_lines.append(speaker_text)
-        
+
         # Join with double newlines (blank line between speakers)
         return "\n\n".join(markdown_lines)
-        
+
     except Exception as e:
         logger.error(f"Error formatting transcript: {e}")
         # Fallback to plain text
@@ -235,22 +269,256 @@ def process_audio_with_assemblyai(file_path: str, keyterms: Optional[list] = Non
 
         # Transcribe the audio file
         transcript = transcriber.transcribe(file_path, config=config)
-        
+
         # Check for errors
         if transcript.error:
             logger.error(f"AssemblyAI transcription error: {transcript.error}")
             raise Exception(f"Transcription failed: {transcript.error}")
-        
+
         logger.info(f"AssemblyAI transcription completed for: {file_path}")
-        
+
         # Format the transcript with speaker diarization
         formatted_transcript = format_assemblyai_transcript(transcript)
-        
+
         return formatted_transcript
-        
+
     except Exception as e:
         logger.error(f"Error processing audio with AssemblyAI: {str(e)}")
         raise
+
+def chunk_transcript(transcript_text: str, max_words: int = 800) -> list[dict]:
+    """
+    Split transcript into chunks, prioritizing speaker boundaries and sentence boundaries.
+
+    Args:
+        transcript_text: The full transcript text
+        max_words: Maximum words per chunk
+
+    Returns:
+        List of dicts with 'text' and 'new_speaker' keys
+    """
+    words = transcript_text.split()
+    total_words = len(words)
+    logger.info(f"Chunking transcript: {total_words} total words, max_words={max_words}")
+
+    if total_words <= max_words:
+        logger.info(f"Transcript fits in single chunk ({total_words} <= {max_words})")
+        return [{"text": transcript_text, "new_speaker": True}]
+
+    chunks = []
+    current_chunk = []
+    current_word_count = 0
+
+    # Split into lines (each line should be a speaker segment)
+    lines = transcript_text.strip().split('\n')
+    logger.info(f"Split into {len(lines)} lines")
+    for i, line in enumerate(lines[:3]):  # Log first 3 lines for debugging
+        logger.info(f"Line {i+1}: '{line}' ({len(line.split())} words)")
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        line_words = line.split()
+        line_word_count = len(line_words)
+
+        # If adding this line would exceed max_words and we have content, save current chunk
+        if current_word_count + line_word_count > max_words and current_chunk:
+            # Save current chunk (new speaker since it's a line boundary)
+            chunks.append({"text": '\n'.join(current_chunk), "new_speaker": True})
+            current_chunk = []
+            current_word_count = 0
+
+        # If a single line is longer than max_words, split it at sentence boundaries
+        if line_word_count > max_words:
+            logger.info(f"Line too long ({line_word_count} words), splitting at sentences")
+            # Split long speaker segments at sentence boundaries
+            sentences = line.split('. ')
+
+            first_sentence_in_line = True
+            for i, sentence in enumerate(sentences):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+
+                # Add period back except for last sentence
+                if i < len(sentences) - 1 and not sentence.endswith('.'):
+                    sentence += '.'
+
+                sentence_words = sentence.split()
+
+                # If current chunk + this sentence would exceed max_words, save current chunk
+                if current_word_count + len(sentence_words) > max_words and current_chunk:
+                    # First sentence in line starts new speaker, others are continuations
+                    chunks.append({"text": '\n'.join(current_chunk), "new_speaker": first_sentence_in_line})
+                    current_chunk = []
+                    current_word_count = 0
+                    first_sentence_in_line = False
+
+                # Add this sentence to current chunk
+                current_chunk.append(sentence)
+                current_word_count += len(sentence_words)
+        else:
+            # Add the whole line
+            current_chunk.append(line)
+            current_word_count += line_word_count
+
+    # Add final chunk if it has content
+    if current_chunk:
+        chunks.append({"text": '\n'.join(current_chunk), "new_speaker": True})
+
+    logger.info(f"Chunking complete: created {len(chunks)} chunks")
+    for i, chunk in enumerate(chunks):
+        chunk_word_count = len(chunk["text"].split())
+        new_speaker_flag = chunk["new_speaker"]
+        logger.info(f"Chunk {i+1}: {chunk_word_count} words, new_speaker={new_speaker_flag}")
+
+    return chunks
+
+def generate_chapters_with_gpt5(transcript_text: str) -> str:
+    """Generate chapter markers from the full transcript using GPT-5."""
+    try:
+        logger.info("Generating chapters with GPT-5")
+
+        system_prompt = """You are an expert at analyzing transcripts and creating chapter markers.
+Your task is to analyze the entire transcript and generate a list of chapters that help readers navigate the content.
+
+Requirements:
+- Create chapter markers at natural topic boundaries
+- Aim for approximately one chapter per 10-20 minutes of speech
+- Each chapter should have a timestamp (based on the timestamps in the transcript) and a short descriptive phrase
+- Format each chapter as: - (HH:MM:SS) A short phrase summarising this section of text
+- The phrase should be concise (5-8 words maximum) and descriptive
+- Chapters should reflect major topic changes or segments
+
+Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
+
+        response = client.chat.completions.create(
+            model="gpt-5-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": transcript_text}
+            ],
+        )
+
+        chapters = response.choices[0].message.content
+        logger.info("Chapters generated successfully")
+        return chapters
+
+    except Exception as e:
+        logger.error(f"Error generating chapters with GPT-5: {str(e)}")
+        return ""
+
+def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Optional[str] = None) -> str:
+    """Process the transcript with GPT-5 for language processing and enhancement."""
+    try:
+        logger.info("Starting GPT-5 processing of transcript")
+
+        # Determine if we should generate chapters
+        # Only generate if there's more than one speaker and transcript is long enough
+        word_count = len(transcript_text.split())
+        speaker_count = len(set([line.split('**')[1].split('**')[0] for line in transcript_text.split('\n') if '**' in line]))
+        should_generate_chapters = speaker_count > 1 and word_count > 500
+
+        logger.info(f"Word count: {word_count}, Speaker count: {speaker_count}, Generate chapters: {should_generate_chapters}")
+
+        # First, generate chapters from the full transcript if conditions are met
+        chapters = ""
+        if should_generate_chapters:
+            chapters = generate_chapters_with_gpt5(transcript_text)
+
+        # Check if transcript needs chunking
+        chunks = chunk_transcript(transcript_text, max_words=1000) #Max words is best set at around 800 to keep the chunks small enough for GPT-5
+        logger.info(f"Split transcript into {len(chunks)} chunks")
+
+        # Build system prompt with optional chapter context
+        system_prompt_parts = ["You are an expert transcript editor. Your task is to process the transcript according to the following instructions. Please:"]
+
+        if chapters:
+            system_prompt_parts.append(f"\n## Context\nThe following is a summary of chapters from the overall transcript:\n\n{chapters}\n")
+            system_prompt_parts.append("You are processing this transcript in chunks. Each chunk will indicate which chunk number it is.")
+            system_prompt_parts.append("If you notice that a timestamp in the chunk exactly matches a chapter timestamp from the list above, add a markdown H3 header (###) with the chapter title just before that speaker's line.\n")
+
+        system_prompt_parts.append("""
+- If the below doesn't apply, do not change the original wording. You are to be a subtle editor. Most text should remain identical — do not change things for the sake of it.
+- If there are obvious transcription errors given the overall context, fix them. Similarly, improve punctuation and capitalization where appropriate.
+- Clean up filler words (um, uh, like) and false starts, but preserve natural speech patterns.
+- In some cases, the transcription will incorrectly assume the speaker has changed when it clearly hasn't, creating many lines of few words. In these cases, you can simply delete the new speaker indication altogether when it seems out of place. For example, "**A**: What do — [new line] **B**: You think? [new line] **A**: About this?" should become "**A**: What do you think about this?". Only do this if it makes obvious sense to do so.
+- You will receive one (potentially long) line of text per speaker. If a new topic begins, add a full line break (leaving a blank line) to start a new paragraph.
+- Each new line begins with a timestamp, followed by a speaker label in bold, followed by a colon, followed by the text. Please always delete the timestamp, so the line begins with the speaker label.
+- Speaker labels are letters given in bold, like **A**:. Maintain all speaker labels *exactly* as provided, even if you can infer the true name of the speaker. Don't add in any brackets or extra whitespace. The colon should always remain outside the speaker name, i.e. **A**: not **A:**.
+- Each new speaker must always begin on a new line, separated by a blank line (but remember to always delete the timestamp, so the line begins with the speaker label).
+- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
+- Don't add bolded text anywhere outside of the speaker labels (this may break important regex parsing).
+- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
+
+Return only the improved transcript, maintaining the same format with [HH:MM:SS] **Speaker**: text structure.""")
+
+        if custom_instructions:
+            system_prompt_parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
+
+        system_prompt = "".join(system_prompt_parts)
+
+        processed_chunks = []
+
+        for i, chunk_data in enumerate(chunks):
+            chunk_text = chunk_data["text"]
+            is_new_speaker = chunk_data["new_speaker"]
+            logger.info(f"Processing chunk {i + 1}/{len(chunks)} (new_speaker={is_new_speaker})")
+
+            # Prepare user message with chunk context
+            user_message = chunk_text
+            if len(chunks) > 1:
+                user_message = f"[Chunk {i + 1} of {len(chunks)}]\n\n{chunk_text}"
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-5-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message}
+                    ],
+                )
+
+                processed_chunk = response.choices[0].message.content
+                processed_chunks.append({"text": processed_chunk, "new_speaker": is_new_speaker})
+                logger.info(f"Chunk {i + 1}/{len(chunks)} processed successfully")
+
+            except Exception as chunk_error:
+                logger.error(f"Error processing chunk {i + 1}: {str(chunk_error)}")
+                # Fall back to original chunk if processing fails
+                processed_chunks.append({"text": chunk_text, "new_speaker": is_new_speaker})
+                logger.warning(f"Using original content for chunk {i + 1}")
+
+        # Combine all processed chunks with appropriate spacing
+        final_parts = []
+        for i, chunk_data in enumerate(processed_chunks):
+            if i == 0:
+                # First chunk always gets added
+                final_parts.append(chunk_data["text"])
+            elif chunk_data["new_speaker"]:
+                # New speaker gets double newline
+                final_parts.append("\n\n" + chunk_data["text"])
+            else:
+                # Same speaker continuation gets single space
+                final_parts.append(" " + chunk_data["text"])
+
+        final_transcript = "".join(final_parts)
+
+        # Add chapters at the beginning if they were generated
+        if chapters:
+            final_transcript = f"## Chapters\n\n{chapters}\n\n---\n\n{final_transcript}"
+
+        logger.info("GPT-5 processing completed successfully")
+
+        return final_transcript
+
+    except Exception as e:
+        logger.error(f"Error processing transcript with GPT-5: {str(e)}")
+        # Return original transcript if GPT processing fails
+        logger.warning("Falling back to original transcript due to GPT processing error")
+        return transcript_text
 
 
 def process_transcription(job_id: int):
@@ -261,15 +529,16 @@ def process_transcription(job_id: int):
         if not job:
             logger.error(f"Job {job_id} not found")
             return
-        
+
         if not job.file_path:
             logger.error(f"Job {job_id} missing file path - file may have been deleted or job already processed")
             return
-        
+
         file_path = job.file_path
         filename = job.filename
         user_id = job.user_id
         keyterms_str = job.keyterms
+        custom_instructions = job.custom_instructions
 
     try:
         logger.info(f"Starting AssemblyAI transcription for job {job_id}: {filename}")
@@ -280,11 +549,16 @@ def process_transcription(job_id: int):
             keyterms = [term.strip() for term in keyterms_str.split(',') if term.strip()]
 
         # Process the entire audio file with AssemblyAI (no chunking needed)
-        transcript_text = process_audio_with_assemblyai(file_path, keyterms=keyterms)
-        logger.info(f"AssemblyAI transcription completed for job {job_id}")
-        
-        # Save transcript to file
-        transcript_file_path = save_transcript_to_file(job_id, transcript_text)
+        raw_transcript_text = process_audio_with_assemblyai(file_path, keyterms=keyterms)
+        word_count = len(raw_transcript_text.split())
+        logger.info(f"AssemblyAI transcription completed for job {job_id}. Total word count: {word_count}")
+
+        # Process transcript with GPT-5 for language enhancement
+        final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions)
+        logger.info(f"GPT-5 processing completed for job {job_id}")
+
+        # Save final processed transcript to file
+        transcript_file_path = save_transcript_to_file(job_id, final_transcript_text)
         
         # Delete the original audio file after successful processing
         try:

@@ -53,7 +53,7 @@ async def auth_test(request: Request):
     if user:
         logger.info(f"Auth test successful for user: {user.email}")
         return HTMLResponse(f"""
-            <div hx-get="/jobs/list/view" hx-trigger="load"></div>
+            <div hx-get="/jobs" hx-trigger="load" hx-push-url="true"></div>
             <script>
                 // Load auth status
                 htmx.ajax('GET', '/auth-status', {{target: '#auth-status'}});

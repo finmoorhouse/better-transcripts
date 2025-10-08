@@ -1,4 +1,24 @@
 tailwind.config = {
+    plugins: [
+        // Add typography plugin for prose classes
+        function({ addUtilities }) {
+            addUtilities({
+                '.prose h1': { fontSize: '2.25rem', fontWeight: '800', marginTop: '0', marginBottom: '0.8888889em' },
+                '.prose h2': { fontSize: '1.5rem', fontWeight: '700', marginTop: '2em', marginBottom: '1em' },
+                '.prose h3': { fontSize: '1.25rem', fontWeight: '600', marginTop: '1.6em', marginBottom: '0.6em' },
+                '.prose h4': { fontSize: '1.125rem', fontWeight: '600', marginTop: '1.5em', marginBottom: '0.5em' },
+                '.prose h5': { fontSize: '1rem', fontWeight: '600', marginTop: '1.5em', marginBottom: '0.5em' },
+                '.prose h6': { fontSize: '1rem', fontWeight: '600', marginTop: '1.5em', marginBottom: '0.5em' },
+                '.prose a': { color: '#2563eb', textDecoration: 'underline', fontWeight: '500' },
+                '.prose a:hover': { color: '#1d4ed8' },
+                '.prose strong': { fontWeight: '600' },
+                '.prose p': { marginTop: '1.25em', marginBottom: '1.25em' },
+                '.prose ul': { marginTop: '1.25em', marginBottom: '1.25em', listStyleType: 'disc', paddingLeft: '1.625em' },
+                '.prose ol': { marginTop: '1.25em', marginBottom: '1.25em', listStyleType: 'decimal', paddingLeft: '1.625em' },
+                '.prose li': { marginTop: '0.5em', marginBottom: '0.5em' },
+            })
+        }
+    ],
     theme: {
         extend: {
             fontFamily: {

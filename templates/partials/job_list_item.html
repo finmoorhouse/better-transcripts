@@ -1,0 +1,19 @@
+<li class='p-4 hover:bg-flexoki-ui bg-flexoki-paper-light cursor-pointer transition-colors duration-200 border-b border-flexoki-ui-3 last:border-b-0'
+    hx-get='/jobs/{{ job_data.job.id }}'
+    hx-target='#main-content'
+    hx-swap='innerHTML'
+    hx-push-url='true'>
+    <div class='flex justify-between items-start'>
+        <div class='flex-1 min-w-0'>
+            <div class='font-medium text-flexoki-tx truncate mb-1'>{{ job_data.display_name }}</div>
+            <div class='text-sm text-flexoki-tx-3'>
+                <div>Created: {{ job_data.created_natural }}</div>
+            </div>
+        </div>
+        <div class='ml-4 flex-shrink-0'>
+            <span class='inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full border {{ job_data.status_color }}'>
+                {{ job_data.job.status.title() }}
+            </span>
+        </div>
+    </div>
+</li>

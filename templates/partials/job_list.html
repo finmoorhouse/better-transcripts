@@ -1,0 +1,9 @@
+{% if jobs %}
+<ul class='bg-flexoki-paper rounded-lg border border-flexoki-ui-3 overflow-hidden'>
+    {% for job_data in jobs %}
+    {% include 'partials/job_list_item.html' %}
+    {% endfor %}
+</ul>
+{% else %}
+<div class='text-center py-8 text-flexoki-tx-3'>No transcription jobs found. Upload an audio file to get started!</div>
+{% endif %}
