@@ -34,13 +34,13 @@ async def check_auth(request: Request):
     # User is not authenticated, show login prompt
     return HTMLResponse("""
         <div class="max-w-md mx-auto bg-flexoki-paper-light rounded-lg border border-flexoki-ui-3 p-6 text-center shadow-sm">
-            <h2 class="text-2xl font-semibold mb-2 text-flexoki-tx text-left">Welcome to Better Transcripts</h2>
-            <p class="text-flexoki-tx-3 mb-6 text-left">Please log in to access your transcription jobs.</p>
+            <h2 class="text-2xl font-serif mb-2 text-flexoki-tx text-left">Welcome to Better Transcripts</h2>
+            <p class="text-flexoki-tx-3 mb-6 text-left">Please log in to access your transcriptions.</p>
             <div class="space-y-3">
                 <a href="/login" class="block w-full bg-flexoki-bl hover:bg-flexoki-bl-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
                     Login
                 </a>
-                <a href="/register" class="block w-full bg-flexoki-or hover:bg-flexoki-or-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
+                <a href="/register" class="block w-full bg-slate-500 hover:bg-slate-400 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
                     Register
                 </a>
             </div>
@@ -65,7 +65,7 @@ async def auth_test(request: Request):
         return HTMLResponse("""
             <div class="max-w-md mx-auto bg-flexoki-ui border border-flexoki-ui-3 p-6 text-center">
                 <h2 class="text-2xl font-semibold mb-4 text-flexoki-tx">Session Expired</h2>
-                <p class="text-flexoki-tx-3 mb-6">Please log in again to access your transcription jobs.</p>
+                <p class="text-flexoki-tx-3 mb-6">Please log in again to access your transcriptions.</p>
                 <div class="space-y-3">
                     <a href="/login" class="block w-full bg-flexoki-bl hover:bg-flexoki-bl-2 text-flexoki-paper font-bold py-2 px-4 rounded transition duration-300">
                         Login
@@ -88,7 +88,7 @@ async def auth_status(request: Request):
         return HTMLResponse(f"""
             <div class="flex items-center gap-3">
                 <span class="text-sm text-flexoki-tx-3">Welcome, {user.name}</span>
-                <button onclick="logout()" class="bg-flexoki-re hover:bg-flexoki-re-2 text-flexoki-paper text-sm px-3 py-1 rounded transition duration-300">
+                <button onclick="logout()" class="bg-flexoki-ui-2 hover:bg-flexoki-ui-3 text-flexoki-tx text-sm px-2 pb-1 pt-0.5 rounded border border-flexoki-ui-3 transition duration-300">
                     Logout
                 </button>
             </div>

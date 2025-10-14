@@ -48,12 +48,14 @@ client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # File upload constants
 UPLOAD_DIR = "./uploads"
 TRANSCRIPT_DIR = "./transcripts"
+RAW_TRANSCRIPT_DIR = "./raw_transcripts"
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
 ALLOWED_EXTENSIONS = {".wav", ".mp3"}
 
 # Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
+os.makedirs(RAW_TRANSCRIPT_DIR, exist_ok=True)
 
 # Database setup
 DATABASE_URL = "sqlite:///./test.db"
@@ -411,20 +413,36 @@ def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Opti
             system_prompt_parts.append("You are processing this transcript in chunks. Each chunk will indicate which chunk number it is.")
             system_prompt_parts.append("If you notice that a timestamp in the chunk exactly matches a chapter timestamp from the list above, add a markdown H3 header (###) with the chapter title just before that speaker's line.\n")
 
+        # Shared instructions for all transcripts
         system_prompt_parts.append("""
 - If the below doesn't apply, do not change the original wording. You are to be a subtle editor. Most text should remain identical — do not change things for the sake of it.
 - If there are obvious transcription errors given the overall context, fix them. Similarly, improve punctuation and capitalization where appropriate.
 - Clean up filler words (um, uh, like) and false starts, but preserve natural speech patterns.
+- Be careful about accidentally including punctuation that will get interpreted by the markdown parser. For example, a numeral followed by a period will be interpreted as a list item. You may italicise words with asterisks.
+- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
+- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
+""")
+
+        # Speaker-specific instructions
+        if speaker_count == 1:
+            system_prompt_parts.append("""
+## Single Speaker Format
+- The very first line of the first chunk you receive will begin with a timestamp, followed by a speaker label. Please delete BOTH the timestamp AND the speaker label (since there is only one speaker).
+- Break the text into natural paragraphs based on topic changes. Add a blank line between paragraphs.
+- Don't add bolded text anywhere (this may break important regex parsing).
+
+Return only the improved transcript as plain paragraphs with no timestamps or speaker labels.""")
+        else:
+            system_prompt_parts.append("""
+## Multiple Speaker Format
 - In some cases, the transcription will incorrectly assume the speaker has changed when it clearly hasn't, creating many lines of few words. In these cases, you can simply delete the new speaker indication altogether when it seems out of place. For example, "**A**: What do — [new line] **B**: You think? [new line] **A**: About this?" should become "**A**: What do you think about this?". Only do this if it makes obvious sense to do so.
 - You will receive one (potentially long) line of text per speaker. If a new topic begins, add a full line break (leaving a blank line) to start a new paragraph.
 - Each new line begins with a timestamp, followed by a speaker label in bold, followed by a colon, followed by the text. Please always delete the timestamp, so the line begins with the speaker label.
 - Speaker labels are letters given in bold, like **A**:. Maintain all speaker labels *exactly* as provided, even if you can infer the true name of the speaker. Don't add in any brackets or extra whitespace. The colon should always remain outside the speaker name, i.e. **A**: not **A:**.
 - Each new speaker must always begin on a new line, separated by a blank line (but remember to always delete the timestamp, so the line begins with the speaker label).
-- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
 - Don't add bolded text anywhere outside of the speaker labels (this may break important regex parsing).
-- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
 
-Return only the improved transcript, maintaining the same format with [HH:MM:SS] **Speaker**: text structure.""")
+Return only the improved transcript, maintaining the same format with **Speaker**: text structure (no timestamps).""")
 
         if custom_instructions:
             system_prompt_parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
@@ -523,6 +541,15 @@ def process_transcription(job_id: int):
         raw_transcript_text = process_audio_with_assemblyai(file_path, keyterms=keyterms)
         word_count = len(raw_transcript_text.split())
         logger.info(f"AssemblyAI transcription completed for job {job_id}. Total word count: {word_count}")
+
+        # In development mode, save the raw transcript for debugging
+        environment = os.getenv("ENVIRONMENT", "production")
+        if environment == "development":
+            raw_filename = f"raw_transcript_job_{job_id}.md"
+            raw_file_path = os.path.join(RAW_TRANSCRIPT_DIR, raw_filename)
+            with open(raw_file_path, "w", encoding="utf-8") as f:
+                f.write(raw_transcript_text)
+            logger.info(f"Saved raw transcript for debugging: {raw_file_path}")
 
         # Process transcript with GPT-5 for language enhancement
         final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions)

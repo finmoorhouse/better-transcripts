@@ -1,92 +1,78 @@
-<div class='max-w-2xl mx-auto bg-white rounded-lg border border-flexoki-ui-3 p-6 shadow-sm'>
-    <div class='mb-4'>
-        <h2 class='text-2xl font-semibold text-flexoki-tx'>Transcriptions</h2>
-    </div>
-
-    <div class='space-y-4'>
-        <form hx-post='/jobs/add' hx-target='#job-result' hx-swap='innerHTML' hx-encoding='multipart/form-data'
-              hx-on::before-request="showUploadProgress(event)"
-              hx-on::after-request="hideUploadProgress(event)">
-            <div class='space-y-4'>
-                <div class='w-full p-6 border border border-flexoki-ui-3 rounded-lg bg-flexoki-paper-light transition-colors duration-200'>
-                    <div class='flex flex-col items-center justify-center space-y-4'>
-                        <div class="text-4xl">🎧</div>
-                        <label class='text-lg font-medium text-flexoki-tx'>Upload a new audio file →</label>
-                        <input
-                            type='file'
-                            name='file'
-                            id='file-input'
-                            accept='.wav,.mp3,audio/wav,audio/mpeg'
-                            required
-                            class='hover:shadow-lg transition-shadow duration-200 cursor-pointer border bg-flexoki-paper p-2 rounded-md text-sm text-flexoki-tx file:mr-4 file:py-3 file:px-4 file:rounded-lg file:border-0
-                            file:text-sm file:border-flexoki-ui-3 file:font-semibold file:bg-flexoki-bl file:text-white
-                            hover:file:bg-flexoki-bl-2 file:cursor-pointer'>
-                        <p class='text-sm text-flexoki-tx-3/70'>Support for .wav and .mp3 files up to 100MB</p>
-                        <p class='text-xs text-flexoki-tx-3/70 italic'>Note: The filename will be used as the transcription title</p>
-
-                        <!-- Key Terms Input -->
-                        <div class='w-full pt-4'>
-                            <label class='block text-sm font-medium text-flexoki-tx mb-1'>Key terms (optional)</label>
-                            <p class='text-xs text-flexoki-tx-3/70 mt-1 mb-2'>Help improve transcription accuracy for domain-specific terms</p>
-                            <textarea
-                                name='keyterms'
-                                id='keyterms-input'
-                                placeholder='Enter key terms (such as names and technical terms) separated by commas.'
-                                rows='2'
-                                oninput='updateKeyTermsPills()'
-                                class='w-full p-3 border border-flexoki-ui-3 rounded-md text-sm text-flexoki-tx bg-flexoki-paper focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:border-transparent resize-none'></textarea>
-                            <!-- Pills container -->
-                            <div id='keyterms-pills' class='mt-2 flex flex-wrap gap-2'></div>
-                        </div>
-
-                        <!-- Custom Instructions Input -->
-                        <div class='w-full pt-4'>
-                            <label class='block text-sm font-medium text-flexoki-tx mb-1'>Custom instructions (optional)</label>
-                            <p class='text-xs text-flexoki-tx-3/70 mt-1 mb-2'>Provide specific instructions for how to process the transcript</p>
-                            <textarea
-                                name='custom_instructions'
-                                id='custom-instructions-input'
-                                placeholder='For example, "Add a quick definition for technical terms in square brackets."'
-                                rows='3'
-                                class='w-full p-3 border border-flexoki-ui-3 rounded-md text-sm text-flexoki-tx bg-flexoki-paper focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:border-transparent resize-none'></textarea>
-                        </div>
-
-                        <!-- Simple Upload Indicator -->
-                        <div id='upload-indicator' class='hidden'>
-                            <div class='flex items-center justify-center space-x-2 text-flexoki-bl'>
-                                <div class='animate-spin rounded-full h-4 w-4 border-b-2 border-flexoki-bl'></div>
-                                <span class='text-sm font-medium'>Uploading file...</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <button
-                    type='submit'
-                    id='upload-button'
-                    class='w-full bg-flexoki-bl hover:bg-flexoki-bl-2 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:ring-opacity-50'>
-                    Upload & Create Job
-                </button>
-            </div>
-        </form>
+<div class='space-y-4'>
+    <form hx-post='/jobs/add' hx-target='#job-result' hx-swap='innerHTML' hx-encoding='multipart/form-data'
+        hx-on::before-request="showUploadProgress(event)" hx-on::after-request="hideUploadProgress(event)">
 
         <div
-            id='job-result'
-            class='p-2 min-h-[30px]'>
-            <!-- Add job result will appear here -->
+            class=' max-w-2xl mx-auto bg-white rounded-lg border border-flexoki-ui-3 p-6 shadow-sm w-full p-6 border rounded-lg transition-colors duration-200 max-w-md'>
+            <div class='flex flex-col space-y-1'>
+                <label class='text-2xl text-flexoki-tx font-serif text-flexoki-tx mb-3'>New transcription</label>
+                <h3 class='cursor-pointer text-sm font-medium text-flexoki-tx mb-2 hover:text-flexoki-bl'>Choose a file ⤵
+                </h3>
+                <input type='file' name='file' id='file-input' accept='.wav,.mp3,audio/wav,audio/mpeg' required class='w-full  cursor-pointer border-solid border
+                border-flexoki-ui-3 bg-flexoki-paper-light p-3 rounded-lg text-sm text-flexoki-tx hover:bg-stone-100
+                            file:mr-4 file:py-2 file:px-4 file:rounded-md file:border file:border-flexoki-ui-3 file:border-solid file:text-sm file:font-semibold 
+                            file:bg-white file:text-flexoki-tx-3 hover:file:bg-stone-100 file:cursor-pointer 
+                            focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:ring-opacity-50'>
+                <p class='text-xs text-flexoki-tx-3/70 max-w-xs mx-auto text-center mt-2'>
+                    Support for .wav and .mp3 files. The filename will be used as the transcription title.
+                </p>
+
+                <details class='w-full pt-3'>
+                    <summary class='cursor-pointer text-sm font-medium text-flexoki-tx mb-2 hover:text-flexoki-bl'>
+                        Advanced settings <span class='text-flexoki-tx-3/40'>(optional)</span></summary>
+                    <!-- Key Terms Input -->
+                    <div class='w-full pt-3'>
+                        <label class='block text-sm font-medium text-flexoki-tx mb-1'>Key terms <span
+                                class='text-flexoki-tx-3/50'>(optional)</span></label>
+                        <p class='text-xs text-flexoki-tx-3/70 mb-2'>Help improve accuracy for names and technical
+                            terms</p>
+                        <textarea name='keyterms' id='keyterms-input' placeholder='e.g. Jon Doe, GPQA, Seoul' rows='1'
+                            oninput='updateKeyTermsPills()'
+                            class='w-full p-2 border border-flexoki-ui-3 rounded-md text-sm text-flexoki-tx bg-white focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:border-transparent resize-y'></textarea>
+                        <div id='keyterms-pills' class='mt-2 flex flex-wrap gap-2'></div>
+                    </div>
+                    <!-- Custom Instructions Input -->
+                    <div class='w-full pt-3'>
+                        <label class='block text-sm font-medium text-flexoki-tx mb-1'>Custom instructions <span
+                                class='text-flexoki-tx-3/50'>(optional)</span></label>
+                        <p class='text-xs text-flexoki-tx-3/70 mb-2'>Provide instructions for how the LLM processes
+                            the transcript</p>
+                        <textarea name='custom_instructions' id='custom-instructions-input'
+                            placeholder='e.g. "Add a definition for technical terms in square brackets."' rows='3'
+                            class='w-full p-2 border border-flexoki-ui-3 rounded-md text-sm text-flexoki-tx bg-white focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:border-transparent resize-y'></textarea>
+                    </div>
+                </details>
+
+                <!-- Simple Upload Indicator -->
+                <div id='upload-indicator' class='hidden'>
+                    <div class='flex items-center justify-center space-x-2 text-flexoki-bl'>
+                        <div class='animate-spin rounded-full h-4 w-4 border-b-2 border-flexoki-bl'></div>
+                        <span class='text-sm font-medium'>Uploading file...</span>
+                    </div>
+                </div>
+            </div>
+            <hr class='border-flexoki-ui-2 mt-4 mb-2' />
+            <button type='submit' id='upload-button'
+                class='w-full bg-flexoki-bl-2 hover:bg-flexoki-bl text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:ring-opacity-50 mt-3'>
+                Upload audio file
+            </button>
         </div>
 
-        <div class='border-t pt-4'>
-            <div class='flex justify-between items-center mb-4'>
-                <h3 class='font-semibold'>Transcription Jobs:</h3>
-                <button
-                    hx-get='/jobs'
-                    hx-target='#main-content'
-                    hx-swap='innerHTML'
-                    class='text-blue-500 hover:text-blue-600 text-sm'>
-                    Refresh
-                </button>
-            </div>
-            <div id='job-list'>
+    </form>
+
+    <div id='job-result' class='p-2 min-h-[30px] max-w-md mx-auto'>
+        <!-- Add job result will appear here -->
+    </div>
+    <div class='max-w-2xl mx-auto bg-white rounded-lg border border-flexoki-ui-3 p-6 shadow-sm'>
+        <div class='flex justify-between items-center mb-4'>
+            <h2 class='text-2xl text-flexoki-tx font-serif'>My transcriptions</h2>
+            <button hx-get='/jobs' hx-target='#main-content' hx-swap='innerHTML'
+                class='text-blue-500 hover:text-blue-600 text-sm'>
+                Refresh
+            </button>
+        </div>
+        <div class='border-t pt-6'>
+            <div id='job-list' hx-get='/jobs/list' hx-trigger='refreshJobs from:body' hx-swap='innerHTML'>
                 {% if jobs %}
                 <ul class='bg-flexoki-paper rounded-lg border border-flexoki-ui-3 overflow-hidden'>
                     {% for job_data in jobs %}
@@ -94,10 +80,19 @@
                     {% endfor %}
                 </ul>
                 {% else %}
-                <div class='text-center py-8 text-flexoki-tx-3'>No transcription jobs found. Upload an audio file to get started!</div>
+                <div class='text-center py-8 text-flexoki-tx-3'>No transcription jobs found. Upload an audio file to get
+                    started!</div>
                 {% endif %}
             </div>
         </div>
+    </div>
+    <div class='max-w-2xl mx-auto p-6 opacity-50 '>
+        <p class="text-sm font-serif">Better Transcripts is a simple web app for generating high-quality transcriptions
+            of recorded conversations, such as for podcasts. It uses AssemblyAI and GPT-5.</p>
+        <p class="text-center mt-3"><a href="https://github.com/finmoorhouse/better-transcripts"
+                class="text-sm font-serif text-flexoki-bl">GitHub</a> • <a
+                href="mailto:7j0sii3g8@mozmail.com"
+                class="text-sm font-serif text-flexoki-bl">Send feedback</a></p>
     </div>
 </div>
 

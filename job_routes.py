@@ -51,9 +51,14 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
             
             # Start background transcription task (non-streaming)
             background_tasks.add_task(process_transcription, db_job.id)
-            
-            # Return simple success response
-            return HTMLResponse(f"<div class='text-green-600 font-semibold'>✅ {file.filename} uploaded successfully. Transcription started in background.</div>")
+
+            # Return success response with trigger to refresh job list
+            return HTMLResponse(
+                f"<div class='text-green-600 font-semibold'>✅ {file.filename} uploaded successfully. Transcription started in background.</div>",
+                headers={
+                    "HX-Trigger": "refreshJobs"
+                }
+            )
             
         except Exception as e:
             # If file save fails, delete the job
@@ -245,7 +250,7 @@ async def download_transcript(job_id: int, user: User = Depends(current_active_u
         
         # If we have a file path, serve the file directly
         if job.transcript_file_path and os.path.exists(job.transcript_file_path):
-            filename = f"transcript_{job.filename.rsplit('.', 1)[0]}.md"
+            filename = f"{job.filename.rsplit('.', 1)[0]}.md"
             return FileResponse(
                 path=job.transcript_file_path,
                 filename=filename,
@@ -257,7 +262,7 @@ async def download_transcript(job_id: int, user: User = Depends(current_active_u
             temp_file.write(transcript_content)
             temp_file.close()
             
-            filename = f"transcript_{job.filename.rsplit('.', 1)[0]}.md"
+            filename = f"{job.filename.rsplit('.', 1)[0]}.md"
             return FileResponse(
                 path=temp_file.name,
                 filename=filename,
@@ -372,24 +377,11 @@ async def delete_job(job_id: int, user: User = Depends(current_active_user)):
         session.commit()
         
         logger.info(f"Deleted job {job_id} ({job.filename}) and associated files")
-        
-        # Return success message that redirects to job list
-        return HTMLResponse(f"""
-            <div class='max-w-2xl mx-auto bg-white border border-green-200 p-6 rounded-lg text-center'>
-                <div class='mb-4'>
-                    <div class='text-green-600 font-semibold text-lg mb-2'>✅ Job Deleted Successfully</div>
-                    <div class='text-sm text-gray-600'>
-                        <div>Job: {job.filename}</div>
-                        {f"<div>Cleaned up: {', '.join(files_deleted)}</div>" if files_deleted else ""}
-                    </div>
-                </div>
-                <button
-                    hx-get="/jobs"
-                    hx-target="#main-content"
-                    hx-swap="innerHTML"
-                    hx-push-url="true"
-                    class='bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded transition duration-300'>
-                    Back to Jobs
-                </button>
-            </div>
-        """)
+
+        # Use HTMX redirect header to go back to jobs list
+        return HTMLResponse(
+            content="",
+            headers={
+                "HX-Redirect": "/jobs"
+            }
+        )

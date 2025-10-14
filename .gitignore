@@ -18,6 +18,8 @@ wheels/
 !/uploads/.gitkeep
 /transcripts/*
 !/transcripts/.gitkeep
+/raw_transcripts/*
+!/raw_transcripts/.gitkeep
 
 # Database files
 *.db
