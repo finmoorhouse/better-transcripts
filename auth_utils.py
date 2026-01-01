@@ -8,14 +8,14 @@ logger = logging.getLogger(__name__)
 async def get_current_user_safe(request: Request):
     """Safely get current user, return None if not authenticated"""
     try:
-        from auth import auth_backend, get_user_manager, get_user_db
+        from auth import auth_backend, get_user_manager, get_user_db, SECRET_KEY
         from fastapi_users.authentication.strategy import JWTStrategy
         from fastapi_users.authentication.transport import CookieTransport
         from main import engine
         
         # Get the auth backend components
         cookie_transport = CookieTransport(cookie_max_age=3600)
-        jwt_strategy = JWTStrategy(secret="SECRET", lifetime_seconds=3600)
+        jwt_strategy = JWTStrategy(secret=SECRET_KEY, lifetime_seconds=3600)
         
         # Try to get token from cookies
         token = request.cookies.get("fastapiusersauth")
