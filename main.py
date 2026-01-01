@@ -23,15 +23,17 @@ import markdown
 # Import models
 from models import Job, JobStatus
 
-# Set up logging with HTTP debugging
+# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(levelname)s:%(name)s:%(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Enable detailed HTTP logging for debugging API issues
-logging.getLogger("httpx").setLevel(logging.INFO)
+# Reduce HTTP logging verbosity to WARNING to reduce log clutter
+# (AssemblyAI polls every 10 seconds, which creates a lot of INFO logs)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 # Load environment variables
@@ -39,6 +41,8 @@ load_dotenv()
 
 # Configure AssemblyAI API
 aai.settings.api_key = os.getenv("ASSEMBLY_KEY")
+# Set polling interval to 10 seconds (default is 3 seconds) to reduce API calls and log clutter
+aai.settings.polling_interval = 10.0
 transcriber = aai.Transcriber()
 
 # Configure OpenAI API
@@ -58,7 +62,7 @@ os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
 os.makedirs(RAW_TRANSCRIPT_DIR, exist_ok=True)
 
 # Database setup
-DATABASE_URL = "sqlite:///./test.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
 engine = create_engine(DATABASE_URL)
 
 def create_db_and_tables():
@@ -383,7 +387,7 @@ Return ONLY the chapter list in the specified markdown format, with no additiona
         logger.error(f"Error generating chapters with GPT-5: {str(e)}")
         return ""
 
-def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Optional[str] = None) -> str:
+def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Optional[str] = None, job_id: Optional[int] = None) -> str:
     """Process the transcript with GPT-5 for language processing and enhancement."""
     try:
         logger.info("Starting GPT-5 processing of transcript")
@@ -452,6 +456,14 @@ Return only the improved transcript, maintaining the same format with **Speaker*
         processed_chunks = []
 
         for i, chunk_data in enumerate(chunks):
+            # Check if job was deleted before processing each chunk
+            if job_id is not None:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    if not job:
+                        logger.info(f"Job {job_id} was deleted during GPT processing. Stopping at chunk {i + 1}/{len(chunks)}.")
+                        raise Exception("Job was deleted by user")
+
             chunk_text = chunk_data["text"]
             is_new_speaker = chunk_data["new_speaker"]
             logger.info(f"Processing chunk {i + 1}/{len(chunks)} (new_speaker={is_new_speaker})")
@@ -542,6 +554,13 @@ def process_transcription(job_id: int):
         word_count = len(raw_transcript_text.split())
         logger.info(f"AssemblyAI transcription completed for job {job_id}. Total word count: {word_count}")
 
+        # Check if job was deleted after AssemblyAI transcription
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if not job:
+                logger.info(f"Job {job_id} was deleted during processing. Stopping.")
+                return
+
         # In development mode, save the raw transcript for debugging
         environment = os.getenv("ENVIRONMENT", "production")
         if environment == "development":
@@ -552,7 +571,7 @@ def process_transcription(job_id: int):
             logger.info(f"Saved raw transcript for debugging: {raw_file_path}")
 
         # Process transcript with GPT-5 for language enhancement
-        final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions)
+        final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
         logger.info(f"GPT-5 processing completed for job {job_id}")
 
         # Save final processed transcript to file

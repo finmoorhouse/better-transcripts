@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import Optional
 
@@ -47,9 +48,12 @@ async def get_user_db(session: Session = Depends(lambda: Session(get_engine())))
     yield SQLModelUserDatabase(session, User)
 
 
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-in-production")
+
+
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
-    reset_password_token_secret = "SECRET"
-    verification_token_secret = "SECRET"
+    reset_password_token_secret = SECRET_KEY
+    verification_token_secret = SECRET_KEY
 
     async def on_after_register(self, user: User, request: Optional[Request] = None):
         print(f"User {user.id} has registered.")
@@ -73,7 +77,7 @@ cookie_transport = CookieTransport(cookie_max_age=3600)
 
 
 def get_jwt_strategy() -> JWTStrategy:
-    return JWTStrategy(secret="SECRET", lifetime_seconds=3600)
+    return JWTStrategy(secret=SECRET_KEY, lifetime_seconds=3600)
 
 
 auth_backend = AuthenticationBackend(
