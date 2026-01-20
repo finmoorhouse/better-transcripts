@@ -82,9 +82,19 @@
     </div>
     {% else %}
     {% if job.status == "processing" %}
-    <div class='mt-6'>
-        <div class='bg-blue-50 p-4 rounded-lg border text-blue-700'>
-            Transcription in progress. This may take a few minutes.
+    <div class='mt-6' hx-get='/jobs/{{ job.id }}' hx-trigger='every 3s' hx-target='#main-content' hx-swap='innerHTML'>
+        <div class='bg-blue-50 p-4 rounded-lg border border-blue-200'>
+            <div class='flex items-center space-x-3'>
+                <div class='animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600'></div>
+                <div>
+                    <div class='text-blue-700 font-medium'>Processing...</div>
+                    {% if job.progress_message %}
+                    <div class='text-blue-600 text-sm mt-1'>{{ job.progress_message }}</div>
+                    {% else %}
+                    <div class='text-blue-600 text-sm mt-1'>Starting transcription...</div>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </div>
     {% elif job.status == "failed" %}

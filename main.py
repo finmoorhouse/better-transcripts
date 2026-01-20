@@ -18,6 +18,7 @@ import json
 from dotenv import load_dotenv
 import assemblyai as aai
 import openai
+from google import genai
 import markdown
 
 # Import models
@@ -47,7 +48,56 @@ transcriber = aai.Transcriber()
 
 # Configure OpenAI API
 openai.api_key = os.getenv("OPENAI_API_KEY")
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Configure Gemini API
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Model processing speed tracking (seconds per input word)
+# Priors based on experimentation - will be refined during processing
+MODEL_SPEED_PRIORS = {
+    "gpt-5-mini": 0.008,      # ~125 words/sec
+    "gemini-2.5-flash": 0.005  # ~200 words/sec (faster)
+}
+
+# Runtime speed estimates (updated as chunks complete)
+# Format: {job_id: {"samples": [(words, seconds), ...], "estimate": float}}
+job_speed_estimates = {}
+
+def get_time_estimate(job_id: int, word_count: int, model: str) -> float:
+    """Get estimated processing time for a chunk based on prior + learned data."""
+    prior = MODEL_SPEED_PRIORS.get(model, 0.007)
+
+    if job_id in job_speed_estimates and job_speed_estimates[job_id]["samples"]:
+        # Use weighted average of prior and observed data
+        samples = job_speed_estimates[job_id]["samples"]
+        total_words = sum(w for w, _ in samples)
+        total_time = sum(t for _, t in samples)
+        observed_rate = total_time / total_words if total_words > 0 else prior
+
+        # Weight observed data more as we get more samples
+        weight = min(len(samples) / 3, 1.0)  # Full weight after 3 chunks
+        estimate = (weight * observed_rate) + ((1 - weight) * prior)
+    else:
+        estimate = prior
+
+    return word_count * estimate
+
+def record_chunk_timing(job_id: int, word_count: int, elapsed_time: float):
+    """Record timing data from a completed chunk to improve estimates."""
+    if job_id not in job_speed_estimates:
+        job_speed_estimates[job_id] = {"samples": [], "estimate": 0}
+
+    job_speed_estimates[job_id]["samples"].append((word_count, elapsed_time))
+
+    # Log the observed rate
+    rate = elapsed_time / word_count if word_count > 0 else 0
+    logger.info(f"Job {job_id} chunk timing: {word_count} words in {elapsed_time:.2f}s ({rate:.4f}s/word)")
+
+def cleanup_job_estimates(job_id: int):
+    """Clean up speed estimates when job completes."""
+    if job_id in job_speed_estimates:
+        del job_speed_estimates[job_id]
 
 # File upload constants
 UPLOAD_DIR = "./uploads"
@@ -116,11 +166,20 @@ def save_transcript_to_file(job_id: int, transcript_text: str) -> str:
     """Save transcript text to .md file and return file path."""
     filename = f"transcript_job_{job_id}.md"
     file_path = os.path.join(TRANSCRIPT_DIR, filename)
-    
+
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(transcript_text)
-    
+
     return file_path
+
+def update_job_progress(job_id: int, message: str):
+    """Update the progress message for a job."""
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job:
+            job.progress_message = message
+            session.commit()
+            logger.info(f"Job {job_id} progress: {message}")
 
 def load_transcript_from_file(file_path: str) -> str:
     """Load transcript text from .md file."""
@@ -357,6 +416,7 @@ def generate_chapters_with_gpt5(transcript_text: str) -> str:
     """Generate chapter markers from the full transcript using GPT-5."""
     try:
         logger.info("Generating chapters with GPT-5")
+        start_time = time.time()
 
         system_prompt = """You are an expert at analyzing transcripts and creating chapter markers.
 Your task is to analyze the entire transcript and generate a list of chapters that help readers navigate the content.
@@ -371,7 +431,7 @@ Requirements:
 
 Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
 
-        response = client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -380,6 +440,8 @@ Return ONLY the chapter list in the specified markdown format, with no additiona
         )
 
         chapters = response.choices[0].message.content
+        elapsed = time.time() - start_time
+        logger.info(f"Chapters generated in {elapsed:.2f}s")
         logger.info("Chapters generated successfully")
         return chapters
 
@@ -403,6 +465,8 @@ def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Opti
         # First, generate chapters from the full transcript if conditions are met
         chapters = ""
         if should_generate_chapters:
+            if job_id:
+                update_job_progress(job_id, "Generating chapter markers...")
             chapters = generate_chapters_with_gpt5(transcript_text)
 
         # Check if transcript needs chunking
@@ -463,10 +527,13 @@ Return only the improved transcript, maintaining the same format with **Speaker*
                     if not job:
                         logger.info(f"Job {job_id} was deleted during GPT processing. Stopping at chunk {i + 1}/{len(chunks)}.")
                         raise Exception("Job was deleted by user")
+                # Update progress for each chunk
+                update_job_progress(job_id, f"Processing with GPT-5-mini: chunk {i + 1} of {len(chunks)}...")
 
             chunk_text = chunk_data["text"]
             is_new_speaker = chunk_data["new_speaker"]
-            logger.info(f"Processing chunk {i + 1}/{len(chunks)} (new_speaker={is_new_speaker})")
+            chunk_word_count = len(chunk_text.split())
+            logger.info(f"Processing chunk {i + 1}/{len(chunks)} ({chunk_word_count} words, new_speaker={is_new_speaker})")
 
             # Prepare user message with chunk context
             user_message = chunk_text
@@ -474,17 +541,46 @@ Return only the improved transcript, maintaining the same format with **Speaker*
                 user_message = f"[Chunk {i + 1} of {len(chunks)}]\n\n{chunk_text}"
 
             try:
-                response = client.chat.completions.create(
+                chunk_start_time = time.time()
+                estimated_time = get_time_estimate(job_id, chunk_word_count, "gpt-5-mini") if job_id else chunk_word_count * 0.008
+
+                # Use streaming to show progress during processing
+                stream = openai_client.chat.completions.create(
                     model="gpt-5-mini",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message}
                     ],
+                    stream=True,
                 )
 
-                processed_chunk = response.choices[0].message.content
+                # Collect streamed response and update progress periodically
+                collected_content = []
+                last_progress_update = time.time()
+                for stream_chunk in stream:
+                    if stream_chunk.choices[0].delta.content:
+                        collected_content.append(stream_chunk.choices[0].delta.content)
+
+                    # Update progress every 1 second
+                    now = time.time()
+                    if job_id and (now - last_progress_update) >= 1.0:
+                        elapsed = now - chunk_start_time
+                        if estimated_time > 0:
+                            progress_pct = min(int((elapsed / estimated_time) * 100), 99)
+                            update_job_progress(job_id, f"Chunk {i + 1}/{len(chunks)}: {elapsed:.0f}s elapsed (~{estimated_time:.0f}s expected, {progress_pct}%)")
+                        else:
+                            update_job_progress(job_id, f"Chunk {i + 1}/{len(chunks)}: {elapsed:.0f}s elapsed...")
+                        last_progress_update = now
+
+                chunk_elapsed = time.time() - chunk_start_time
+                processed_chunk = "".join(collected_content)
                 processed_chunks.append({"text": processed_chunk, "new_speaker": is_new_speaker})
-                logger.info(f"Chunk {i + 1}/{len(chunks)} processed successfully")
+
+                # Record timing for future estimates
+                if job_id:
+                    record_chunk_timing(job_id, chunk_word_count, chunk_elapsed)
+
+                logger.info(f"Chunk {i + 1}/{len(chunks)} processed in {chunk_elapsed:.2f}s ({chunk_word_count} words)")
 
             except Exception as chunk_error:
                 logger.error(f"Error processing chunk {i + 1}: {str(chunk_error)}")
@@ -522,6 +618,199 @@ Return only the improved transcript, maintaining the same format with **Speaker*
         return transcript_text
 
 
+def generate_chapters_with_gemini(transcript_text: str) -> str:
+    """Generate chapter markers from the full transcript using Gemini."""
+    try:
+        logger.info("Generating chapters with Gemini")
+        start_time = time.time()
+
+        system_prompt = """You are an expert at analyzing transcripts and creating chapter markers.
+Your task is to analyze the entire transcript and generate a list of chapters that help readers navigate the content.
+
+Requirements:
+- Create chapter markers at natural topic boundaries
+- Aim for approximately one chapter per 10-20 minutes of speech
+- Each chapter should have a timestamp (based on the timestamps in the transcript) and a short descriptive phrase
+- Format each chapter as: - (HH:MM:SS) A short phrase summarising this section of text
+- The phrase should be concise (5-8 words maximum) and descriptive
+- Chapters should reflect major topic changes or segments
+
+Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
+
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[system_prompt, transcript_text]
+        )
+        elapsed = time.time() - start_time
+        logger.info(f"Chapters generated in {elapsed:.2f}s")
+        chapters = response.text
+        logger.info("Chapters generated successfully with Gemini")
+        return chapters
+
+    except Exception as e:
+        logger.error(f"Error generating chapters with Gemini: {str(e)}")
+        return ""
+
+
+def process_transcript_with_gemini(transcript_text: str, custom_instructions: Optional[str] = None, job_id: Optional[int] = None) -> str:
+    """Process the transcript with Gemini for language processing and enhancement."""
+    try:
+        logger.info("Starting Gemini processing of transcript")
+
+        # Determine if we should generate chapters
+        word_count = len(transcript_text.split())
+        speaker_count = len(set([line.split('**')[1].split('**')[0] for line in transcript_text.split('\n') if '**' in line]))
+        should_generate_chapters = speaker_count > 1 and word_count > 500
+
+        logger.info(f"Word count: {word_count}, Speaker count: {speaker_count}, Generate chapters: {should_generate_chapters}")
+
+        # First, generate chapters from the full transcript if conditions are met
+        chapters = ""
+        if should_generate_chapters:
+            if job_id:
+                update_job_progress(job_id, "Generating chapter markers...")
+            chapters = generate_chapters_with_gemini(transcript_text)
+
+        # Check if transcript needs chunking
+        chunks = chunk_transcript(transcript_text, max_words=1000)
+        logger.info(f"Split transcript into {len(chunks)} chunks")
+
+        # Build system prompt with optional chapter context
+        system_prompt_parts = ["You are an expert transcript editor. Your task is to process the transcript according to the following instructions. Please:"]
+
+        if chapters:
+            system_prompt_parts.append(f"\n## Context\nThe following is a summary of chapters from the overall transcript:\n\n{chapters}\n")
+            system_prompt_parts.append("You are processing this transcript in chunks. Each chunk will indicate which chunk number it is.")
+            system_prompt_parts.append("If you notice that a timestamp in the chunk exactly matches a chapter timestamp from the list above, add a markdown H3 header (###) with the chapter title just before that speaker's line.\n")
+
+        # Shared instructions for all transcripts
+        system_prompt_parts.append("""
+- If the below doesn't apply, do not change the original wording. You are to be a subtle editor. Most text should remain identical — do not change things for the sake of it.
+- If there are obvious transcription errors given the overall context, fix them. Similarly, improve punctuation and capitalization where appropriate.
+- Clean up filler words (um, uh, like) and false starts, but preserve natural speech patterns.
+- Be careful about accidentally including punctuation that will get interpreted by the markdown parser. For example, a numeral followed by a period will be interpreted as a list item. You may italicise words with asterisks.
+- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
+- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
+""")
+
+        # Speaker-specific instructions
+        if speaker_count == 1:
+            system_prompt_parts.append("""
+## Single Speaker Format
+- The very first line of the first chunk you receive will begin with a timestamp, followed by a speaker label. Please delete BOTH the timestamp AND the speaker label (since there is only one speaker).
+- Break the text into natural paragraphs based on topic changes. Add a blank line between paragraphs.
+- Don't add bolded text anywhere (this may break important regex parsing).
+
+Return only the improved transcript as plain paragraphs with no timestamps or speaker labels.""")
+        else:
+            system_prompt_parts.append("""
+## Multiple Speaker Format
+- In some cases, the transcription will incorrectly assume the speaker has changed when it clearly hasn't, creating many lines of few words. In these cases, you can simply delete the new speaker indication altogether when it seems out of place. For example, "**A**: What do — [new line] **B**: You think? [new line] **A**: About this?" should become "**A**: What do you think about this?". Only do this if it makes obvious sense to do so.
+- You will receive one (potentially long) line of text per speaker. If a new topic begins, add a full line break (leaving a blank line) to start a new paragraph.
+- Each new line begins with a timestamp, followed by a speaker label in bold, followed by a colon, followed by the text. Please always delete the timestamp, so the line begins with the speaker label.
+- Speaker labels are letters given in bold, like **A**:. Maintain all speaker labels *exactly* as provided, even if you can infer the true name of the speaker. Don't add in any brackets or extra whitespace. The colon should always remain outside the speaker name, i.e. **A**: not **A:**.
+- Each new speaker must always begin on a new line, separated by a blank line (but remember to always delete the timestamp, so the line begins with the speaker label).
+- Don't add bolded text anywhere outside of the speaker labels (this may break important regex parsing).
+
+Return only the improved transcript, maintaining the same format with **Speaker**: text structure (no timestamps).""")
+
+        if custom_instructions:
+            system_prompt_parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
+
+        system_prompt = "".join(system_prompt_parts)
+
+        processed_chunks = []
+
+        for i, chunk_data in enumerate(chunks):
+            # Check if job was deleted before processing each chunk
+            if job_id is not None:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    if not job:
+                        logger.info(f"Job {job_id} was deleted during Gemini processing. Stopping at chunk {i + 1}/{len(chunks)}.")
+                        raise Exception("Job was deleted by user")
+                # Update progress for each chunk
+                update_job_progress(job_id, f"Processing with Gemini: chunk {i + 1} of {len(chunks)}...")
+
+            chunk_text = chunk_data["text"]
+            is_new_speaker = chunk_data["new_speaker"]
+            chunk_word_count = len(chunk_text.split())
+            logger.info(f"Processing chunk {i + 1}/{len(chunks)} with Gemini ({chunk_word_count} words, new_speaker={is_new_speaker})")
+
+            # Prepare user message with chunk context
+            user_message = chunk_text
+            if len(chunks) > 1:
+                user_message = f"[Chunk {i + 1} of {len(chunks)}]\n\n{chunk_text}"
+
+            try:
+                chunk_start_time = time.time()
+                estimated_time = get_time_estimate(job_id, chunk_word_count, "gemini-2.5-flash") if job_id else chunk_word_count * 0.005
+
+                # Use streaming to show progress during processing
+                stream = gemini_client.models.generate_content_stream(
+                    model="gemini-2.5-flash",
+                    contents=[system_prompt, user_message]
+                )
+
+                # Collect streamed response and update progress periodically
+                collected_content = []
+                last_progress_update = time.time()
+                for stream_chunk in stream:
+                    if stream_chunk.text:
+                        collected_content.append(stream_chunk.text)
+
+                    # Update progress every 1 second
+                    now = time.time()
+                    if job_id and (now - last_progress_update) >= 1.0:
+                        elapsed = now - chunk_start_time
+                        if estimated_time > 0:
+                            progress_pct = min(int((elapsed / estimated_time) * 100), 99)
+                            update_job_progress(job_id, f"Chunk {i + 1}/{len(chunks)}: {elapsed:.0f}s elapsed (~{estimated_time:.0f}s expected, {progress_pct}%)")
+                        else:
+                            update_job_progress(job_id, f"Chunk {i + 1}/{len(chunks)}: {elapsed:.0f}s elapsed...")
+                        last_progress_update = now
+
+                chunk_elapsed = time.time() - chunk_start_time
+                processed_chunk = "".join(collected_content)
+                processed_chunks.append({"text": processed_chunk, "new_speaker": is_new_speaker})
+
+                # Record timing for future estimates
+                if job_id:
+                    record_chunk_timing(job_id, chunk_word_count, chunk_elapsed)
+
+                logger.info(f"Chunk {i + 1}/{len(chunks)} processed in {chunk_elapsed:.2f}s ({chunk_word_count} words)")
+
+            except Exception as chunk_error:
+                logger.error(f"Error processing chunk {i + 1} with Gemini: {str(chunk_error)}")
+                processed_chunks.append({"text": chunk_text, "new_speaker": is_new_speaker})
+                logger.warning(f"Using original content for chunk {i + 1}")
+
+        # Combine all processed chunks with appropriate spacing
+        final_parts = []
+        for i, chunk_data in enumerate(processed_chunks):
+            if i == 0:
+                final_parts.append(chunk_data["text"])
+            elif chunk_data["new_speaker"]:
+                final_parts.append("\n\n" + chunk_data["text"])
+            else:
+                final_parts.append(" " + chunk_data["text"])
+
+        final_transcript = "".join(final_parts)
+
+        # Add chapters at the beginning if they were generated
+        if chapters:
+            final_transcript = f"## Chapters\n\n{chapters}\n\n---\n\n{final_transcript}"
+
+        logger.info("Gemini processing completed successfully")
+
+        return final_transcript
+
+    except Exception as e:
+        logger.error(f"Error processing transcript with Gemini: {str(e)}")
+        logger.warning("Falling back to original transcript due to Gemini processing error")
+        return transcript_text
+
+
 def process_transcription(job_id: int):
     """Background task to transcribe audio using AssemblyAI API."""
     # Get job details and file path first
@@ -540,9 +829,11 @@ def process_transcription(job_id: int):
         user_id = job.user_id
         keyterms_str = job.keyterms
         custom_instructions = job.custom_instructions
+        llm_model = job.llm_model or "gemini-2.5-flash"
 
     try:
         logger.info(f"Starting AssemblyAI transcription for job {job_id}: {filename}")
+        update_job_progress(job_id, "Transcribing audio with AssemblyAI...")
 
         # Parse keyterms from comma-separated string to list
         keyterms = None
@@ -553,6 +844,7 @@ def process_transcription(job_id: int):
         raw_transcript_text = process_audio_with_assemblyai(file_path, keyterms=keyterms)
         word_count = len(raw_transcript_text.split())
         logger.info(f"AssemblyAI transcription completed for job {job_id}. Total word count: {word_count}")
+        update_job_progress(job_id, f"Transcription complete ({word_count} words). Starting LLM processing...")
 
         # Check if job was deleted after AssemblyAI transcription
         with Session(engine) as session:
@@ -570,9 +862,18 @@ def process_transcription(job_id: int):
                 f.write(raw_transcript_text)
             logger.info(f"Saved raw transcript for debugging: {raw_file_path}")
 
-        # Process transcript with GPT-5 for language enhancement
-        final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
-        logger.info(f"GPT-5 processing completed for job {job_id}")
+        # Process transcript with selected LLM for language enhancement
+        logger.info(f"Job {job_id} llm_model value: '{llm_model}' (type: {type(llm_model).__name__})")
+        if llm_model in ("gemini-2.5-flash", "gemini-3.0-flash"):  # Support both old and new values
+            logger.info(f"Using Gemini 2.5 Flash for job {job_id}")
+            update_job_progress(job_id, "Processing transcript with Gemini 2.5 Flash...")
+            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        else:
+            logger.info(f"Using GPT-5-mini for job {job_id}")
+            update_job_progress(job_id, "Processing transcript with GPT-5-mini...")
+            final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        logger.info(f"LLM processing completed for job {job_id}")
+        update_job_progress(job_id, "Finalizing transcript...")
 
         # Save final processed transcript to file
         transcript_file_path = save_transcript_to_file(job_id, final_transcript_text)
@@ -605,9 +906,14 @@ def process_transcription(job_id: int):
                 
                 session.commit()
                 logger.info(f"Job {job_id} completed successfully")
-        
+
+        # Clean up speed estimates for this job
+        cleanup_job_estimates(job_id)
+
     except Exception as e:
         logger.error(f"Transcription failed for job {job_id}: {str(e)}")
+        # Clean up speed estimates on failure too
+        cleanup_job_estimates(job_id)
         # Handle general failure with a fresh session
         try:
             with Session(engine) as session:
