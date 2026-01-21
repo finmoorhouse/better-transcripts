@@ -103,7 +103,7 @@ def cleanup_job_estimates(job_id: int):
 UPLOAD_DIR = "./uploads"
 TRANSCRIPT_DIR = "./transcripts"
 RAW_TRANSCRIPT_DIR = "./raw_transcripts"
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB in bytes
 ALLOWED_EXTENSIONS = {".wav", ".mp3"}
 
 # Ensure directories exist
@@ -113,7 +113,24 @@ os.makedirs(RAW_TRANSCRIPT_DIR, exist_ok=True)
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
-engine = create_engine(DATABASE_URL)
+
+# Configure connection pool based on database type
+# SQLite doesn't handle concurrent connections well, so use NullPool
+# PostgreSQL can use larger pool for concurrent requests during long-running jobs
+if DATABASE_URL.startswith("sqlite"):
+    from sqlalchemy.pool import StaticPool
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=20,
+        max_overflow=30,
+        pool_timeout=60,
+    )
 
 def create_db_and_tables():
     try:
@@ -924,6 +941,105 @@ def process_transcription(job_id: int):
                     session.commit()
         except Exception as cleanup_error:
             logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
+
+
+def process_raw_transcript(job_id: int):
+    """Background task to process an already-transcribed file (skips AssemblyAI)."""
+    # Get job details and file path first
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if not job:
+            logger.error(f"Job {job_id} not found")
+            return
+
+        if not job.file_path:
+            logger.error(f"Job {job_id} missing file path")
+            return
+
+        file_path = job.file_path
+        filename = job.filename
+        user_id = job.user_id
+        custom_instructions = job.custom_instructions
+        llm_model = job.llm_model or "gemini-2.5-flash"
+
+    try:
+        logger.info(f"Starting raw transcript processing for job {job_id}: {filename}")
+        update_job_progress(job_id, "Reading raw transcript...")
+
+        # Read the raw transcript file
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_transcript_text = f.read()
+
+        word_count = len(raw_transcript_text.split())
+        logger.info(f"Raw transcript loaded for job {job_id}. Word count: {word_count}")
+        update_job_progress(job_id, f"Transcript loaded ({word_count} words). Starting LLM processing...")
+
+        # Check if job was deleted
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if not job:
+                logger.info(f"Job {job_id} was deleted during processing. Stopping.")
+                return
+
+        # Process transcript with selected LLM for language enhancement
+        logger.info(f"Job {job_id} llm_model value: '{llm_model}' (type: {type(llm_model).__name__})")
+        if llm_model in ("gemini-2.5-flash", "gemini-3.0-flash"):
+            logger.info(f"Using Gemini 2.5 Flash for job {job_id}")
+            update_job_progress(job_id, "Processing transcript with Gemini 2.5 Flash...")
+            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        else:
+            logger.info(f"Using GPT-5-mini for job {job_id}")
+            update_job_progress(job_id, "Processing transcript with GPT-5-mini...")
+            final_transcript_text = process_transcript_with_gpt5(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        logger.info(f"LLM processing completed for job {job_id}")
+        update_job_progress(job_id, "Finalizing transcript...")
+
+        # Save final processed transcript to file
+        transcript_file_path = save_transcript_to_file(job_id, final_transcript_text)
+
+        # Delete the original raw transcript file after successful processing
+        try:
+            os.remove(file_path)
+            logger.info(f"Deleted original raw transcript file: {file_path}")
+        except OSError as e:
+            logger.warning(f"Failed to delete raw transcript file {file_path}: {str(e)}")
+
+        # Lower cost since we skipped AssemblyAI
+        api_cost = 0.05
+
+        # Update job completion
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if job:
+                job.status = JobStatus.completed
+                job.transcript_file_path = transcript_file_path
+                job.completed_at = datetime.utcnow()
+                job.api_cost = api_cost
+                job.file_path = None
+
+                if user_id:
+                    user = session.get(User, user_id)
+                    if user:
+                        user.total_api_cost += api_cost
+
+                session.commit()
+                logger.info(f"Job {job_id} completed successfully (raw transcript processing)")
+
+        cleanup_job_estimates(job_id)
+
+    except Exception as e:
+        logger.error(f"Raw transcript processing failed for job {job_id}: {str(e)}")
+        cleanup_job_estimates(job_id)
+        try:
+            with Session(engine) as session:
+                job = session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.failed
+                    job.completed_at = datetime.utcnow()
+                    session.commit()
+        except Exception as cleanup_error:
+            logger.error(f"Failed to update job status for job {job_id}: {str(cleanup_error)}")
+
 
 # Removed old Gemini streaming code - now using AssemblyAI
 

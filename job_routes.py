@@ -67,6 +67,64 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
             session.commit()
             return HTMLResponse(f"<div class='text-red-600 font-semibold'>❌ Failed to save file: {str(e)}</div>")
 
+
+@router.post("/jobs/add-transcript")
+async def add_transcript_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), custom_instructions: str = Form(""), llm_model: str = Form("gemini-2.5-flash"), user: User = Depends(current_active_user)):
+    """Upload a raw transcript file and process it with LLM (skips AssemblyAI transcription)."""
+    from main import engine, process_raw_transcript, UPLOAD_DIR
+    from models import Job, JobStatus
+
+    # Validate file extension
+    if not file.filename:
+        return HTMLResponse("<div class='text-red-600 font-semibold'>❌ No file selected</div>")
+
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in {".md", ".txt"}:
+        return HTMLResponse("<div class='text-red-600 font-semibold'>❌ Invalid file type. Only .md and .txt files are allowed for raw transcripts.</div>")
+
+    with Session(engine) as session:
+        custom_instructions_cleaned = custom_instructions.strip() if custom_instructions else None
+        llm_model_cleaned = llm_model.strip() if llm_model else "gemini-2.5-flash"
+        db_job = Job(
+            filename=file.filename,
+            status=JobStatus.processing,
+            user_id=user.id,
+            custom_instructions=custom_instructions_cleaned,
+            llm_model=llm_model_cleaned
+        )
+        session.add(db_job)
+        session.commit()
+        session.refresh(db_job)
+
+        try:
+            # Save the raw transcript file
+            safe_filename = f"job_{db_job.id}_{file.filename}"
+            file_path = os.path.join(UPLOAD_DIR, safe_filename)
+
+            with open(file_path, "wb") as buffer:
+                import shutil
+                shutil.copyfileobj(file.file, buffer)
+
+            file_size = os.path.getsize(file_path)
+
+            db_job.file_path = file_path
+            db_job.file_size = file_size
+            session.commit()
+
+            # Start background processing task (skips AssemblyAI)
+            background_tasks.add_task(process_raw_transcript, db_job.id)
+
+            return HTMLResponse(
+                f"<div class='text-green-600 font-semibold'>✅ {file.filename} uploaded successfully. LLM processing started (skipping transcription).</div>",
+                headers={"HX-Trigger": "refreshJobs"}
+            )
+
+        except Exception as e:
+            session.delete(db_job)
+            session.commit()
+            return HTMLResponse(f"<div class='text-red-600 font-semibold'>❌ Failed to save file: {str(e)}</div>")
+
+
 # Streaming endpoint removed - using non-streaming background processing now
 
 @router.get("/jobs/list")

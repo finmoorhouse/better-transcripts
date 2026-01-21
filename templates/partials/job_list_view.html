@@ -51,6 +51,25 @@
                             <option value='gemini-2.5-flash' selected>Gemini 2.5 Flash (default)</option>
                         </select>
                     </div>
+                    <!-- Raw Transcript Upload (Power User Feature) -->
+                    <details class='w-full pt-3'>
+                        <summary class='cursor-pointer text-xs font-medium text-flexoki-tx-3/60 mb-2 hover:text-flexoki-bl'>
+                            Already have a transcript? Upload it directly</summary>
+                        <div class='pt-2 pl-2 border-l-2 border-flexoki-ui-3'>
+                            <p class='text-xs text-flexoki-tx-3/70 mb-3'>Skip the transcription step and go straight to LLM processing. Upload a raw transcript file (.md or .txt) in the expected format.</p>
+                            <div id='raw-transcript-form'>
+                                <input type='file' name='transcript_file' id='transcript-file-input' accept='.md,.txt,text/markdown,text/plain'
+                                    class='w-full cursor-pointer border-solid border border-flexoki-ui-3 bg-flexoki-paper-light p-2 rounded-lg text-xs text-flexoki-tx hover:bg-stone-100
+                                    file:mr-3 file:py-1 file:px-3 file:rounded-md file:border file:border-flexoki-ui-3 file:border-solid file:text-xs file:font-semibold
+                                    file:bg-white file:text-flexoki-tx-3 hover:file:bg-stone-100 file:cursor-pointer
+                                    focus:outline-none focus:ring-2 focus:ring-flexoki-bl focus:ring-opacity-50'>
+                                <button type='button' onclick='uploadRawTranscript()'
+                                    class='mt-2 w-full bg-flexoki-tx-3/20 hover:bg-flexoki-tx-3/30 text-flexoki-tx text-sm font-medium py-2 px-4 rounded-lg transition-colors duration-200'>
+                                    Upload raw transcript
+                                </button>
+                            </div>
+                        </div>
+                    </details>
                 </details>
 
                 <!-- Simple Upload Indicator -->
@@ -152,5 +171,41 @@
                 pillsContainer.appendChild(pill);
             });
         }
+    }
+
+    function uploadRawTranscript() {
+        const fileInput = document.getElementById('transcript-file-input');
+        const customInstructions = document.getElementById('custom-instructions-input');
+        const llmModel = document.getElementById('llm-model-select');
+        const resultDiv = document.getElementById('job-result');
+
+        if (!fileInput.files || fileInput.files.length === 0) {
+            resultDiv.innerHTML = "<div class='text-red-600 font-semibold'>❌ Please select a transcript file first.</div>";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        formData.append('custom_instructions', customInstructions ? customInstructions.value : '');
+        formData.append('llm_model', llmModel ? llmModel.value : 'gemini-2.5-flash');
+
+        // Show uploading state
+        resultDiv.innerHTML = "<div class='text-flexoki-bl font-semibold'>Uploading transcript...</div>";
+
+        fetch('/jobs/add-transcript', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.text())
+        .then(html => {
+            resultDiv.innerHTML = html;
+            // Clear the file input
+            fileInput.value = '';
+            // Trigger job list refresh
+            document.body.dispatchEvent(new CustomEvent('refreshJobs'));
+        })
+        .catch(error => {
+            resultDiv.innerHTML = "<div class='text-red-600 font-semibold'>❌ Upload failed: " + error.message + "</div>";
+        });
     }
 </script>
