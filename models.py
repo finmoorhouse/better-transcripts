@@ -25,6 +25,8 @@ class Job(SQLModel, table=True):
     custom_instructions: Optional[str] = Field(default=None)  # Custom instructions for GPT-5 processing
     llm_model: Optional[str] = Field(default="gemini-2.5-flash")  # LLM model for transcript processing
     progress_message: Optional[str] = Field(default=None)  # Current progress status message
+    chunks_total: Optional[int] = Field(default=None)  # Total number of chunks to process
+    chunks_completed: Optional[int] = Field(default=None)  # Number of chunks completed
     user_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id", index=True)
     api_cost: Optional[float] = Field(default=None)  # Cost of this job in dollars
     created_at: datetime = Field(default_factory=datetime.utcnow)

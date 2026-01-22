@@ -49,6 +49,7 @@ async def get_user_db(session: Session = Depends(lambda: Session(get_engine())))
 
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-in-production")
+print(f"SECRET_KEY loaded: {SECRET_KEY[:8]}...")  # Debug: remove after fixing
 
 
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):

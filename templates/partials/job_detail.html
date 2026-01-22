@@ -83,17 +83,38 @@
     {% else %}
     {% if job.status == "processing" %}
     <div class='mt-6' hx-get='/jobs/{{ job.id }}' hx-trigger='every 3s' hx-target='#main-content' hx-swap='innerHTML'>
-        <div class='bg-blue-50 p-4 rounded-lg border border-blue-200'>
-            <div class='flex items-center space-x-3'>
-                <div class='animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600'></div>
-                <div>
-                    <div class='text-blue-700 font-medium'>Processing...</div>
-                    {% if job.progress_message %}
-                    <div class='text-blue-600 text-sm mt-1'>{{ job.progress_message }}</div>
-                    {% else %}
-                    <div class='text-blue-600 text-sm mt-1'>Starting transcription...</div>
-                    {% endif %}
+        <div class='bg-flexoki-ui p-5 rounded-lg border border-flexoki-ui-3'>
+            <!-- Status header with retro indicator -->
+            <div class='flex items-center space-x-3 mb-4'>
+                <div class='flex space-x-1'>
+                    <span class='w-2 h-2 bg-flexoki-bl rounded-full animate-pulse'></span>
+                    <span class='w-2 h-2 bg-flexoki-bl rounded-full animate-pulse' style='animation-delay: 0.2s'></span>
+                    <span class='w-2 h-2 bg-flexoki-bl rounded-full animate-pulse' style='animation-delay: 0.4s'></span>
                 </div>
+                <div class='text-flexoki-tx font-medium font-serif'>Processing</div>
+            </div>
+
+            <!-- Progress bar -->
+            {% if chunks_total > 0 %}
+            <div class='mb-4'>
+                <div class='flex justify-between text-xs text-flexoki-tx-3 mb-1.5 font-mono'>
+                    <span>{{ chunks_completed }}/{{ chunks_total }} chunks</span>
+                    <span>{{ chunk_progress }}%</span>
+                </div>
+                <div class='h-2 bg-flexoki-ui-2 rounded-full overflow-hidden'>
+                    <div class='h-full bg-flexoki-bl rounded-full transition-all duration-500 ease-out'
+                        style='width: {{ chunk_progress }}%'></div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Progress message -->
+            <div class='text-flexoki-tx-2 text-sm font-mono'>
+                {% if job.progress_message %}
+                <span class='opacity-80'>{{ job.progress_message }}</span><span class='animate-pulse'>▌</span>
+                {% else %}
+                <span class='opacity-80'>Initialising</span><span class='animate-pulse'>▌</span>
+                {% endif %}
             </div>
         </div>
     </div>

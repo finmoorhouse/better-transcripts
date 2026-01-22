@@ -198,6 +198,15 @@ def update_job_progress(job_id: int, message: str):
             session.commit()
             logger.info(f"Job {job_id} progress: {message}")
 
+def update_chunk_progress(job_id: int, chunks_total: int, chunks_completed: int):
+    """Update chunk progress tracking for a job."""
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job:
+            job.chunks_total = chunks_total
+            job.chunks_completed = chunks_completed
+            session.commit()
+
 def load_transcript_from_file(file_path: str) -> str:
     """Load transcript text from .md file."""
     try:
@@ -536,6 +545,10 @@ Return only the improved transcript, maintaining the same format with **Speaker*
 
         processed_chunks = []
 
+        # Initialize chunk tracking
+        if job_id is not None:
+            update_chunk_progress(job_id, len(chunks), 0)
+
         for i, chunk_data in enumerate(chunks):
             # Check if job was deleted before processing each chunk
             if job_id is not None:
@@ -596,6 +609,7 @@ Return only the improved transcript, maintaining the same format with **Speaker*
                 # Record timing for future estimates
                 if job_id:
                     record_chunk_timing(job_id, chunk_word_count, chunk_elapsed)
+                    update_chunk_progress(job_id, len(chunks), i + 1)
 
                 logger.info(f"Chunk {i + 1}/{len(chunks)} processed in {chunk_elapsed:.2f}s ({chunk_word_count} words)")
 
@@ -603,6 +617,8 @@ Return only the improved transcript, maintaining the same format with **Speaker*
                 logger.error(f"Error processing chunk {i + 1}: {str(chunk_error)}")
                 # Fall back to original chunk if processing fails
                 processed_chunks.append({"text": chunk_text, "new_speaker": is_new_speaker})
+                if job_id:
+                    update_chunk_progress(job_id, len(chunks), i + 1)
                 logger.warning(f"Using original content for chunk {i + 1}")
 
         # Combine all processed chunks with appropriate spacing
@@ -738,6 +754,10 @@ Return only the improved transcript, maintaining the same format with **Speaker*
 
         processed_chunks = []
 
+        # Initialize chunk tracking
+        if job_id is not None:
+            update_chunk_progress(job_id, len(chunks), 0)
+
         for i, chunk_data in enumerate(chunks):
             # Check if job was deleted before processing each chunk
             if job_id is not None:
@@ -794,12 +814,15 @@ Return only the improved transcript, maintaining the same format with **Speaker*
                 # Record timing for future estimates
                 if job_id:
                     record_chunk_timing(job_id, chunk_word_count, chunk_elapsed)
+                    update_chunk_progress(job_id, len(chunks), i + 1)
 
                 logger.info(f"Chunk {i + 1}/{len(chunks)} processed in {chunk_elapsed:.2f}s ({chunk_word_count} words)")
 
             except Exception as chunk_error:
                 logger.error(f"Error processing chunk {i + 1} with Gemini: {str(chunk_error)}")
                 processed_chunks.append({"text": chunk_text, "new_speaker": is_new_speaker})
+                if job_id:
+                    update_chunk_progress(job_id, len(chunks), i + 1)
                 logger.warning(f"Using original content for chunk {i + 1}")
 
         # Combine all processed chunks with appropriate spacing

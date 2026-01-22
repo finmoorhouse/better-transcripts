@@ -217,6 +217,11 @@ async def get_job_detail(job_id: int, request: Request, user: User = Depends(cur
             # Format completion time as HH:MM only
             completed_time = job.completed_at.astimezone().strftime('%H:%M') if job.completed_at.tzinfo else job.completed_at.replace(tzinfo=timezone.utc).astimezone().strftime('%H:%M')
 
+        # Calculate chunk progress percentage
+        chunk_progress = 0
+        if job.chunks_total and job.chunks_total > 0:
+            chunk_progress = int((job.chunks_completed or 0) / job.chunks_total * 100)
+
         context = {
             "request": request,
             "job": job,
@@ -227,6 +232,9 @@ async def get_job_detail(job_id: int, request: Request, user: User = Depends(cur
             "speakers": speakers,
             "created_natural": created_natural,
             "completed_time": completed_time,
+            "chunk_progress": chunk_progress,
+            "chunks_completed": job.chunks_completed or 0,
+            "chunks_total": job.chunks_total or 0,
         }
 
         # If direct browser visit, wrap in full page layout
