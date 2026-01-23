@@ -1,0 +1,75 @@
+<div class="max-w-4xl mx-auto">
+    <div class="flex justify-between items-center mb-6">
+        <h2 class="text-xl font-serif text-flexoki-tx">Admin Dashboard</h2>
+        <span class="text-sm text-flexoki-tx-3">{{ users|length }} users</span>
+    </div>
+
+    {% if users %}
+    <div class="bg-flexoki-paper rounded-lg border border-flexoki-ui-3 overflow-hidden">
+        <table class="w-full">
+            <thead class="bg-flexoki-ui-2 border-b border-flexoki-ui-3">
+                <tr>
+                    <th class="text-left px-4 py-3 text-sm font-medium text-flexoki-tx-3">Email</th>
+                    <th class="text-left px-4 py-3 text-sm font-medium text-flexoki-tx-3">Name</th>
+                    <th class="text-center px-4 py-3 text-sm font-medium text-flexoki-tx-3">Jobs</th>
+                    <th class="text-right px-4 py-3 text-sm font-medium text-flexoki-tx-3">Total Cost</th>
+                    <th class="text-center px-4 py-3 text-sm font-medium text-flexoki-tx-3">Status</th>
+                    <th class="text-right px-4 py-3 text-sm font-medium text-flexoki-tx-3">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user_data in users %}
+                <tr class="border-b border-flexoki-ui-3 last:border-b-0 hover:bg-flexoki-ui transition-colors duration-200">
+                    <td class="px-4 py-3">
+                        <button
+                            class="text-flexoki-bl hover:text-flexoki-bl-2 hover:underline text-left"
+                            hx-get="/admin/users/{{ user_data.user.id }}/jobs"
+                            hx-target="#main-content"
+                            hx-swap="innerHTML"
+                            hx-push-url="true">
+                            {{ user_data.user.email }}
+                        </button>
+                    </td>
+                    <td class="px-4 py-3 text-flexoki-tx">{{ user_data.user.name }}</td>
+                    <td class="px-4 py-3 text-center text-flexoki-tx-3">{{ user_data.job_count }}</td>
+                    <td class="px-4 py-3 text-right text-flexoki-tx-3">{{ user_data.total_cost }}</td>
+                    <td class="px-4 py-3 text-center">
+                        {% if user_data.user.is_superuser %}
+                        <span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-flexoki-pu-2/20 text-flexoki-pu border border-flexoki-pu-2">
+                            Admin
+                        </span>
+                        {% elif user_data.user.is_active %}
+                        <span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-flexoki-gr-2/20 text-flexoki-gr border border-flexoki-gr-2">
+                            Active
+                        </span>
+                        {% else %}
+                        <span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-flexoki-ui-2 text-flexoki-tx-3 border border-flexoki-ui-3">
+                            Inactive
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                        {% if user_data.user.id != current_user.id %}
+                        <button
+                            class="text-flexoki-re hover:text-flexoki-re-2 text-sm px-2 py-1 rounded border border-flexoki-re-2/50 hover:bg-flexoki-re-2/10 transition-colors duration-200"
+                            hx-delete="/admin/users/{{ user_data.user.id }}"
+                            hx-target="#main-content"
+                            hx-swap="innerHTML"
+                            hx-confirm="Are you sure you want to delete user {{ user_data.user.email }}? This will also delete all their jobs and files. This action cannot be undone.">
+                            Delete
+                        </button>
+                        {% else %}
+                        <span class="text-flexoki-tx-3 text-sm">(you)</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="text-center py-8 text-flexoki-tx-3 bg-flexoki-paper rounded-lg border border-flexoki-ui-3">
+        No users found.
+    </div>
+    {% endif %}
+</div>

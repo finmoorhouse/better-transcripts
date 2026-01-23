@@ -1144,9 +1144,13 @@ app.include_router(page_router)
 from auth_routes import router as auth_router
 app.include_router(auth_router)
 
-# Include job routes  
+# Include job routes
 from job_routes import router as job_router
 app.include_router(job_router)
+
+# Include admin routes
+from admin_routes import router as admin_router
+app.include_router(admin_router)
 
 # Routes are now handled by job_routes.py
 

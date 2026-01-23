@@ -85,8 +85,18 @@ async def auth_test(request: Request):
 async def auth_status(request: Request):
     user = await get_current_user_safe(request)
     if user:
+        # Build admin link if user is superuser
+        admin_link = ""
+        if user.is_superuser:
+            admin_link = """
+                <a href="/admin" class="text-sm text-flexoki-pu hover:text-flexoki-pu-2 transition duration-300">
+                    Admin
+                </a>
+            """
+
         return HTMLResponse(f"""
             <div class="flex items-center gap-3">
+                {admin_link}
                 <span class="text-sm text-flexoki-tx-3">Welcome, {user.name}</span>
                 <button onclick="logout()" class="bg-flexoki-ui-2 hover:bg-flexoki-ui-3 text-flexoki-tx text-sm px-2 pb-1 pt-0.5 rounded border border-flexoki-ui-3 transition duration-300">
                     Logout

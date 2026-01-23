@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Dashboard - Better Transcripts{% endblock %}
+
+{% block auth_trigger %}hx-get="/auth-status" hx-trigger="load"{% endblock %}
+
+{% block main_content_attrs %}{% endblock %}
+
+{% block content %}
+{% include 'partials/admin_dashboard.html' %}
+{% endblock %}
