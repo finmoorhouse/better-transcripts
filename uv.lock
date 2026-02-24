@@ -104,17 +104,18 @@ wheels = [
 
 [[package]]
 name = "assemblyai"
-version = "0.43.1"
+version = "0.52.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "pydantic-settings", marker = "python_full_version >= '3.14'" },
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9b/a6/51324e434a250f44f5d6d041e5acb8a98451604dbe8aaa9e5f91bf1dc902/assemblyai-0.43.1.tar.gz", hash = "sha256:c39e8ddb4434af316ade3259e51f86be8134c24be821d8cd84502850ea551951", size = 53970, upload-time = "2025-08-12T21:22:14.547Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0b/33/3ef2e42ade1f0683225994fd7dd3154cceee025ff6afd6e795d16d86be5b/assemblyai-0.52.3.tar.gz", hash = "sha256:0da2a771cb0f0f3ef4aef287100088caac63feac4da21c3a9e6a7da073a0d133", size = 57863, upload-time = "2026-02-23T18:57:54.195Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f2/c4/3df745c07cc66be2d1134629b7007e3c8f3b9931caa5a62e023dcc7984cd/assemblyai-0.43.1-py3-none-any.whl", hash = "sha256:4e6e11eb07130c5c87aea84cc63d80933a6588e9b3aeee80026c2419756a3513", size = 50053, upload-time = "2025-08-12T21:22:13.255Z" },
+    { url = "https://files.pythonhosted.org/packages/65/78/4845cbd6a0745859481d09b43d1044f16970ca4843963806a31af3d391da/assemblyai-0.52.3-py3-none-any.whl", hash = "sha256:0870339a10c4b5a7e6620416a21c42a4a360af6cb83722d8ecfb40e232f8343a", size = 53863, upload-time = "2026-02-23T18:57:53.102Z" },
 ]
 
 [[package]]
@@ -190,7 +191,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "assemblyai", specifier = ">=0.43.1" },
+    { name = "assemblyai", specifier = ">=0.52.3" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
     { name = "fastapi-users", specifier = ">=14.0.1" },
     { name = "fastapi-users-db-sqlmodel", specifier = ">=0.3.0" },
@@ -1015,6 +1016,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/e9/1f7efbe20d0b2b10f6718944b5d8ece9152390904f29a78e68d4e7961159/pydantic_core-2.33.2-pp311-pypy311_pp73-musllinux_1_1_armv7l.whl", hash = "sha256:de4b83bb311557e439b9e186f733f6c645b9417c84e2eb8203f3f820a4b988bf", size = 2239013, upload-time = "2025-04-23T18:33:26.621Z" },
     { url = "https://files.pythonhosted.org/packages/3c/b2/5309c905a93811524a49b4e031e9851a6b00ff0fb668794472ea7746b448/pydantic_core-2.33.2-pp311-pypy311_pp73-musllinux_1_1_x86_64.whl", hash = "sha256:82f68293f055f51b51ea42fafc74b6aad03e70e191799430b90c13d643059ebb", size = 2238715, upload-time = "2025-04-23T18:33:28.656Z" },
     { url = "https://files.pythonhosted.org/packages/32/56/8a7ca5d2cd2cda1d245d34b1c9a942920a718082ae8e54e5f3e5a58b7add/pydantic_core-2.33.2-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:329467cecfb529c925cf2bbd4d60d2c509bc2fb52a20c1045bf09bb70971a9c1", size = 2066757, upload-time = "2025-04-23T18:33:30.645Z" },
+]
+
+[[package]]
+name = "pydantic-settings"
+version = "2.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic", marker = "python_full_version >= '3.14'" },
+    { name = "python-dotenv", marker = "python_full_version >= '3.14'" },
+    { name = "typing-inspection", marker = "python_full_version >= '3.14'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/52/6d/fffca34caecc4a3f97bda81b2098da5e8ab7efc9a66e819074a11955d87e/pydantic_settings-2.13.1.tar.gz", hash = "sha256:b4c11847b15237fb0171e1462bf540e294affb9b86db4d9aa5c01730bdbe4025", size = 223826, upload-time = "2026-02-19T13:45:08.055Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/4b/ccc026168948fec4f7555b9164c724cf4125eac006e176541483d2c959be/pydantic_settings-2.13.1-py3-none-any.whl", hash = "sha256:d56fd801823dbeae7f0975e1f8c8e25c258eb75d278ea7abb5d9cebb01b56237", size = 58929, upload-time = "2026-02-19T13:45:06.034Z" },
 ]
 
 [[package]]

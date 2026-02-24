@@ -274,7 +274,7 @@ def format_local_datetime(utc_dt: datetime) -> str:
 def create_assemblyai_config(keyterms: Optional[list] = None) -> aai.TranscriptionConfig:
     """Create AssemblyAI transcription configuration with speaker diarization."""
     config_params = {
-        'speech_model': 'slam-1',  # Use SLAM-1 speech model
+        'speech_models': ['universal-3-pro'],
         'speaker_labels': True,  # Enable speaker diarization
         'auto_highlights': False,
         'iab_categories': False,
