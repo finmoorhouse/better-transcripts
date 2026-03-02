@@ -23,7 +23,7 @@ class Job(SQLModel, table=True):
     transcript_file_path: Optional[str] = Field(default=None)  # Path to transcript .md file
     keyterms: Optional[str] = Field(default=None)  # Comma-separated keyterms for transcription
     custom_instructions: Optional[str] = Field(default=None)  # Custom instructions for GPT-5 processing
-    llm_model: Optional[str] = Field(default="gemini-2.5-flash")  # LLM model for transcript processing
+    llm_model: Optional[str] = Field(default="gemini-3-flash-preview")  # LLM model for transcript processing
     progress_message: Optional[str] = Field(default=None)  # Current progress status message
     chunks_total: Optional[int] = Field(default=None)  # Total number of chunks to process
     chunks_completed: Optional[int] = Field(default=None)  # Number of chunks completed

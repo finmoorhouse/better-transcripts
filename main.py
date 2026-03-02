@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 import assemblyai as aai
 import openai
 from google import genai
+from google.genai import types
 import markdown
 
 # Import models
@@ -57,7 +58,8 @@ gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 # Priors based on experimentation - will be refined during processing
 MODEL_SPEED_PRIORS = {
     "gpt-5-mini": 0.008,      # ~125 words/sec
-    "gemini-2.5-flash": 0.005  # ~200 words/sec (faster)
+    "gemini-2.5-flash": 0.005, # ~200 words/sec
+    "gemini-3-flash-preview": 0.004  # ~250 words/sec (estimate)
 }
 
 # Runtime speed estimates (updated as chunks complete)
@@ -651,7 +653,7 @@ Return only the improved transcript, maintaining the same format with **Speaker*
         return transcript_text
 
 
-def generate_chapters_with_gemini(transcript_text: str) -> str:
+def generate_chapters_with_gemini(transcript_text: str, model: str = "gemini-2.5-flash") -> str:
     """Generate chapter markers from the full transcript using Gemini."""
     try:
         logger.info("Generating chapters with Gemini")
@@ -670,14 +672,21 @@ Requirements:
 
 Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
 
+        config_kwargs = {}
+        if "gemini-3" in model:
+            config_kwargs["config"] = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="minimal")
+            )
+
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[system_prompt, transcript_text]
+            model=model,
+            contents=[system_prompt, transcript_text],
+            **config_kwargs
         )
         elapsed = time.time() - start_time
         logger.info(f"Chapters generated in {elapsed:.2f}s")
         chapters = response.text
-        logger.info("Chapters generated successfully with Gemini")
+        logger.info(f"Chapters generated successfully with {model}")
         return chapters
 
     except Exception as e:
@@ -685,7 +694,7 @@ Return ONLY the chapter list in the specified markdown format, with no additiona
         return ""
 
 
-def process_transcript_with_gemini(transcript_text: str, custom_instructions: Optional[str] = None, job_id: Optional[int] = None) -> str:
+def process_transcript_with_gemini(transcript_text: str, custom_instructions: Optional[str] = None, job_id: Optional[int] = None, model: str = "gemini-2.5-flash") -> str:
     """Process the transcript with Gemini for language processing and enhancement."""
     try:
         logger.info("Starting Gemini processing of transcript")
@@ -702,7 +711,7 @@ def process_transcript_with_gemini(transcript_text: str, custom_instructions: Op
         if should_generate_chapters:
             if job_id:
                 update_job_progress(job_id, "Generating chapter markers...")
-            chapters = generate_chapters_with_gemini(transcript_text)
+            chapters = generate_chapters_with_gemini(transcript_text, model=model)
 
         # Check if transcript needs chunking
         chunks = chunk_transcript(transcript_text, max_words=1000)
@@ -781,12 +790,18 @@ Return only the improved transcript, maintaining the same format with **Speaker*
 
             try:
                 chunk_start_time = time.time()
-                estimated_time = get_time_estimate(job_id, chunk_word_count, "gemini-2.5-flash") if job_id else chunk_word_count * 0.005
+                estimated_time = get_time_estimate(job_id, chunk_word_count, model) if job_id else chunk_word_count * 0.005
 
                 # Use streaming to show progress during processing
+                stream_kwargs = {}
+                if "gemini-3" in model:
+                    stream_kwargs["config"] = types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(thinking_level="minimal")
+                    )
                 stream = gemini_client.models.generate_content_stream(
-                    model="gemini-2.5-flash",
-                    contents=[system_prompt, user_message]
+                    model=model,
+                    contents=[system_prompt, user_message],
+                    **stream_kwargs
                 )
 
                 # Collect streamed response and update progress periodically
@@ -869,7 +884,7 @@ def process_transcription(job_id: int):
         user_id = job.user_id
         keyterms_str = job.keyterms
         custom_instructions = job.custom_instructions
-        llm_model = job.llm_model or "gemini-2.5-flash"
+        llm_model = job.llm_model or "gemini-3-flash-preview"
 
     try:
         logger.info(f"Starting AssemblyAI transcription for job {job_id}: {filename}")
@@ -904,10 +919,11 @@ def process_transcription(job_id: int):
 
         # Process transcript with selected LLM for language enhancement
         logger.info(f"Job {job_id} llm_model value: '{llm_model}' (type: {type(llm_model).__name__})")
-        if llm_model in ("gemini-2.5-flash", "gemini-3.0-flash"):  # Support both old and new values
-            logger.info(f"Using Gemini 2.5 Flash for job {job_id}")
-            update_job_progress(job_id, "Processing transcript with Gemini 2.5 Flash...")
-            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        if llm_model in ("gemini-2.5-flash", "gemini-3-flash-preview"):
+            model_display = "Gemini 2.5 Flash" if llm_model == "gemini-2.5-flash" else "Gemini 3 Flash"
+            logger.info(f"Using {model_display} for job {job_id}")
+            update_job_progress(job_id, f"Processing transcript with {model_display}...")
+            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id, model=llm_model)
         else:
             logger.info(f"Using GPT-5-mini for job {job_id}")
             update_job_progress(job_id, "Processing transcript with GPT-5-mini...")
@@ -917,7 +933,7 @@ def process_transcription(job_id: int):
 
         # Save final processed transcript to file
         transcript_file_path = save_transcript_to_file(job_id, final_transcript_text)
-        
+
         # Delete the original audio file after successful processing
         try:
             os.remove(file_path)
@@ -983,7 +999,7 @@ def process_raw_transcript(job_id: int):
         filename = job.filename
         user_id = job.user_id
         custom_instructions = job.custom_instructions
-        llm_model = job.llm_model or "gemini-2.5-flash"
+        llm_model = job.llm_model or "gemini-3-flash-preview"
 
     try:
         logger.info(f"Starting raw transcript processing for job {job_id}: {filename}")
@@ -1006,10 +1022,11 @@ def process_raw_transcript(job_id: int):
 
         # Process transcript with selected LLM for language enhancement
         logger.info(f"Job {job_id} llm_model value: '{llm_model}' (type: {type(llm_model).__name__})")
-        if llm_model in ("gemini-2.5-flash", "gemini-3.0-flash"):
-            logger.info(f"Using Gemini 2.5 Flash for job {job_id}")
-            update_job_progress(job_id, "Processing transcript with Gemini 2.5 Flash...")
-            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id)
+        if llm_model in ("gemini-2.5-flash", "gemini-3-flash-preview"):
+            model_display = "Gemini 2.5 Flash" if llm_model == "gemini-2.5-flash" else "Gemini 3 Flash"
+            logger.info(f"Using {model_display} for job {job_id}")
+            update_job_progress(job_id, f"Processing transcript with {model_display}...")
+            final_transcript_text = process_transcript_with_gemini(raw_transcript_text, custom_instructions=custom_instructions, job_id=job_id, model=llm_model)
         else:
             logger.info(f"Using GPT-5-mini for job {job_id}")
             update_job_progress(job_id, "Processing transcript with GPT-5-mini...")

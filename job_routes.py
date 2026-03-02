@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Dependencies imported locally within functions to avoid circular import
 
 @router.post("/jobs/add")
-async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), keyterms: str = Form(""), custom_instructions: str = Form(""), llm_model: str = Form("gemini-2.5-flash"), user: User = Depends(current_active_user)):
+async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), keyterms: str = Form(""), custom_instructions: str = Form(""), llm_model: str = Form("gemini-3-flash-preview"), user: User = Depends(current_active_user)):
     # Local imports to avoid circular import
     from main import engine, validate_audio_file, save_uploaded_file, process_transcription
     from models import Job, JobStatus
@@ -35,7 +35,7 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
         # Create job first to get ID
         keyterms_cleaned = keyterms.strip() if keyterms else None
         custom_instructions_cleaned = custom_instructions.strip() if custom_instructions else None
-        llm_model_cleaned = llm_model.strip() if llm_model else "gemini-2.5-flash"
+        llm_model_cleaned = llm_model.strip() if llm_model else "gemini-3-flash-preview"
         db_job = Job(filename=file.filename, status=JobStatus.processing, user_id=user.id, keyterms=keyterms_cleaned, custom_instructions=custom_instructions_cleaned, llm_model=llm_model_cleaned)
         session.add(db_job)
         session.commit()
@@ -69,7 +69,7 @@ async def add_job(background_tasks: BackgroundTasks, file: UploadFile = File(...
 
 
 @router.post("/jobs/add-transcript")
-async def add_transcript_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), custom_instructions: str = Form(""), llm_model: str = Form("gemini-2.5-flash"), user: User = Depends(current_active_user)):
+async def add_transcript_job(background_tasks: BackgroundTasks, file: UploadFile = File(...), custom_instructions: str = Form(""), llm_model: str = Form("gemini-3-flash-preview"), user: User = Depends(current_active_user)):
     """Upload a raw transcript file and process it with LLM (skips AssemblyAI transcription)."""
     from main import engine, process_raw_transcript, UPLOAD_DIR
     from models import Job, JobStatus
@@ -84,7 +84,7 @@ async def add_transcript_job(background_tasks: BackgroundTasks, file: UploadFile
 
     with Session(engine) as session:
         custom_instructions_cleaned = custom_instructions.strip() if custom_instructions else None
-        llm_model_cleaned = llm_model.strip() if llm_model else "gemini-2.5-flash"
+        llm_model_cleaned = llm_model.strip() if llm_model else "gemini-3-flash-preview"
         db_job = Job(
             filename=file.filename,
             status=JobStatus.processing,
