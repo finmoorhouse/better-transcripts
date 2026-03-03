@@ -21,6 +21,7 @@ import openai
 from google import genai
 from google.genai import types
 import markdown
+from pathlib import Path
 
 # Import models
 from models import Job, JobStatus
@@ -61,6 +62,16 @@ MODEL_SPEED_PRIORS = {
     "gemini-2.5-flash": 0.005, # ~200 words/sec
     "gemini-3-flash-preview": 0.004  # ~250 words/sec (estimate)
 }
+
+# Load prompt templates from markdown files
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+def load_prompt(name: str, **kwargs) -> str:
+    """Load a prompt template from the prompts/ directory, with optional format substitutions."""
+    text = (PROMPTS_DIR / f"{name}.md").read_text()
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
 
 # Runtime speed estimates (updated as chunks complete)
 # Format: {job_id: {"samples": [(words, seconds), ...], "estimate": float}}
@@ -440,24 +451,30 @@ def chunk_transcript(transcript_text: str, max_words: int = 800) -> list[dict]:
 
     return chunks
 
+def build_editing_prompt(chapters: str, speaker_count: int, custom_instructions: Optional[str] = None) -> str:
+    """Build the system prompt for transcript editing from markdown template files."""
+    parts = [load_prompt("edit_transcript")]
+
+    if chapters:
+        parts.append("\n" + load_prompt("chapters_context", chapters=chapters))
+
+    if speaker_count == 1:
+        parts.append("\n" + load_prompt("single_speaker"))
+    else:
+        parts.append("\n" + load_prompt("multi_speaker"))
+
+    if custom_instructions:
+        parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
+
+    return "\n".join(parts)
+
 def generate_chapters_with_gpt5(transcript_text: str) -> str:
     """Generate chapter markers from the full transcript using GPT-5."""
     try:
         logger.info("Generating chapters with GPT-5")
         start_time = time.time()
 
-        system_prompt = """You are an expert at analyzing transcripts and creating chapter markers.
-Your task is to analyze the entire transcript and generate a list of chapters that help readers navigate the content.
-
-Requirements:
-- Create chapter markers at natural topic boundaries
-- Aim for approximately one chapter per 10-20 minutes of speech
-- Each chapter should have a timestamp (based on the timestamps in the transcript) and a short descriptive phrase
-- Format each chapter as: - (HH:MM:SS) A short phrase summarising this section of text
-- The phrase should be concise (5-8 words maximum) and descriptive
-- Chapters should reflect major topic changes or segments
-
-Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
+        system_prompt = load_prompt("chapters")
 
         response = openai_client.chat.completions.create(
             model="gpt-5-mini",
@@ -501,49 +518,7 @@ def process_transcript_with_gpt5(transcript_text: str, custom_instructions: Opti
         chunks = chunk_transcript(transcript_text, max_words=1000) #Max words is best set at around 800 to keep the chunks small enough for GPT-5
         logger.info(f"Split transcript into {len(chunks)} chunks")
 
-        # Build system prompt with optional chapter context
-        system_prompt_parts = ["You are an expert transcript editor. Your task is to process the transcript according to the following instructions. Please:"]
-
-        if chapters:
-            system_prompt_parts.append(f"\n## Context\nThe following is a summary of chapters from the overall transcript:\n\n{chapters}\n")
-            system_prompt_parts.append("You are processing this transcript in chunks. Each chunk will indicate which chunk number it is.")
-            system_prompt_parts.append("If you notice that a timestamp in the chunk exactly matches a chapter timestamp from the list above, add a markdown H3 header (###) with the chapter title just before that speaker's line.\n")
-
-        # Shared instructions for all transcripts
-        system_prompt_parts.append("""
-- If the below doesn't apply, do not change the original wording. You are to be a subtle editor. Most text should remain identical — do not change things for the sake of it.
-- If there are obvious transcription errors given the overall context, fix them. Similarly, improve punctuation and capitalization where appropriate.
-- Clean up filler words (um, uh, like) and false starts, but preserve natural speech patterns.
-- Be careful about accidentally including punctuation that will get interpreted by the markdown parser. For example, a numeral followed by a period will be interpreted as a list item. You may italicise words with asterisks.
-- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
-- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
-""")
-
-        # Speaker-specific instructions
-        if speaker_count == 1:
-            system_prompt_parts.append("""
-## Single Speaker Format
-- The very first line of the first chunk you receive will begin with a timestamp, followed by a speaker label. Please delete BOTH the timestamp AND the speaker label (since there is only one speaker).
-- Break the text into natural paragraphs based on topic changes. Add a blank line between paragraphs.
-- Don't add bolded text anywhere (this may break important regex parsing).
-
-Return only the improved transcript as plain paragraphs with no timestamps or speaker labels.""")
-        else:
-            system_prompt_parts.append("""
-## Multiple Speaker Format
-- In some cases, the transcription will incorrectly assume the speaker has changed when it clearly hasn't, creating many lines of few words. In these cases, you can simply delete the new speaker indication altogether when it seems out of place. For example, "**A**: What do — [new line] **B**: You think? [new line] **A**: About this?" should become "**A**: What do you think about this?". Only do this if it makes obvious sense to do so.
-- You will receive one (potentially long) line of text per speaker. If a new topic begins, add a full line break (leaving a blank line) to start a new paragraph.
-- Each new line begins with a timestamp, followed by a speaker label in bold, followed by a colon, followed by the text. Please always delete the timestamp, so the line begins with the speaker label.
-- Speaker labels are letters given in bold, like **A**:. Maintain all speaker labels *exactly* as provided, even if you can infer the true name of the speaker. Don't add in any brackets or extra whitespace. The colon should always remain outside the speaker name, i.e. **A**: not **A:**.
-- Each new speaker must always begin on a new line, separated by a blank line (but remember to always delete the timestamp, so the line begins with the speaker label).
-- Don't add bolded text anywhere outside of the speaker labels (this may break important regex parsing).
-
-Return only the improved transcript, maintaining the same format with **Speaker**: text structure (no timestamps).""")
-
-        if custom_instructions:
-            system_prompt_parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
-
-        system_prompt = "".join(system_prompt_parts)
+        system_prompt = build_editing_prompt(chapters, speaker_count, custom_instructions)
 
         processed_chunks = []
 
@@ -659,18 +634,7 @@ def generate_chapters_with_gemini(transcript_text: str, model: str = "gemini-2.5
         logger.info("Generating chapters with Gemini")
         start_time = time.time()
 
-        system_prompt = """You are an expert at analyzing transcripts and creating chapter markers.
-Your task is to analyze the entire transcript and generate a list of chapters that help readers navigate the content.
-
-Requirements:
-- Create chapter markers at natural topic boundaries
-- Aim for approximately one chapter per 10-20 minutes of speech
-- Each chapter should have a timestamp (based on the timestamps in the transcript) and a short descriptive phrase
-- Format each chapter as: - (HH:MM:SS) A short phrase summarising this section of text
-- The phrase should be concise (5-8 words maximum) and descriptive
-- Chapters should reflect major topic changes or segments
-
-Return ONLY the chapter list in the specified markdown format, with no additional text or explanation."""
+        system_prompt = load_prompt("chapters")
 
         config_kwargs = {}
         if "gemini-3" in model:
@@ -717,49 +681,7 @@ def process_transcript_with_gemini(transcript_text: str, custom_instructions: Op
         chunks = chunk_transcript(transcript_text, max_words=1000)
         logger.info(f"Split transcript into {len(chunks)} chunks")
 
-        # Build system prompt with optional chapter context
-        system_prompt_parts = ["You are an expert transcript editor. Your task is to process the transcript according to the following instructions. Please:"]
-
-        if chapters:
-            system_prompt_parts.append(f"\n## Context\nThe following is a summary of chapters from the overall transcript:\n\n{chapters}\n")
-            system_prompt_parts.append("You are processing this transcript in chunks. Each chunk will indicate which chunk number it is.")
-            system_prompt_parts.append("If you notice that a timestamp in the chunk exactly matches a chapter timestamp from the list above, add a markdown H3 header (###) with the chapter title just before that speaker's line.\n")
-
-        # Shared instructions for all transcripts
-        system_prompt_parts.append("""
-- If the below doesn't apply, do not change the original wording. You are to be a subtle editor. Most text should remain identical — do not change things for the sake of it.
-- If there are obvious transcription errors given the overall context, fix them. Similarly, improve punctuation and capitalization where appropriate.
-- Clean up filler words (um, uh, like) and false starts, but preserve natural speech patterns.
-- Be careful about accidentally including punctuation that will get interpreted by the markdown parser. For example, a numeral followed by a period will be interpreted as a list item. You may italicise words with asterisks.
-- In some cases, a speaker will mention a concept or noun where it would be useful to add a link. In this case, add a markdown-formatted link (Example: [Concept](https://www.example.com)). Only when you are confident of the correct link. Favour links to credible sources, such as SEP, Wikipedia, Epoch AI, Our World in Data, etc.
-- In general, you should feel more comfortable cutting obvious mistakes or filler words or fragments of speech which trail off, and slightly less comfortable overtly adding or changing words, even if the meaning is preserved. Exceptions include where the speaker obviously meant to use a different word, or some simple connective words were skipped over, but properly speaking would have been used.
-""")
-
-        # Speaker-specific instructions
-        if speaker_count == 1:
-            system_prompt_parts.append("""
-## Single Speaker Format
-- The very first line of the first chunk you receive will begin with a timestamp, followed by a speaker label. Please delete BOTH the timestamp AND the speaker label (since there is only one speaker).
-- Break the text into natural paragraphs based on topic changes. Add a blank line between paragraphs.
-- Don't add bolded text anywhere (this may break important regex parsing).
-
-Return only the improved transcript as plain paragraphs with no timestamps or speaker labels.""")
-        else:
-            system_prompt_parts.append("""
-## Multiple Speaker Format
-- In some cases, the transcription will incorrectly assume the speaker has changed when it clearly hasn't, creating many lines of few words. In these cases, you can simply delete the new speaker indication altogether when it seems out of place. For example, "**A**: What do — [new line] **B**: You think? [new line] **A**: About this?" should become "**A**: What do you think about this?". Only do this if it makes obvious sense to do so.
-- You will receive one (potentially long) line of text per speaker. If a new topic begins, add a full line break (leaving a blank line) to start a new paragraph.
-- Each new line begins with a timestamp, followed by a speaker label in bold, followed by a colon, followed by the text. Please always delete the timestamp, so the line begins with the speaker label.
-- Speaker labels are letters given in bold, like **A**:. Maintain all speaker labels *exactly* as provided, even if you can infer the true name of the speaker. Don't add in any brackets or extra whitespace. The colon should always remain outside the speaker name, i.e. **A**: not **A:**.
-- Each new speaker must always begin on a new line, separated by a blank line (but remember to always delete the timestamp, so the line begins with the speaker label).
-- Don't add bolded text anywhere outside of the speaker labels (this may break important regex parsing).
-
-Return only the improved transcript, maintaining the same format with **Speaker**: text structure (no timestamps).""")
-
-        if custom_instructions:
-            system_prompt_parts.append(f"\n## Custom Instructions\nThe user also provided the following custom instructions:\n\n{custom_instructions}\n")
-
-        system_prompt = "".join(system_prompt_parts)
+        system_prompt = build_editing_prompt(chapters, speaker_count, custom_instructions)
 
         processed_chunks = []
 
